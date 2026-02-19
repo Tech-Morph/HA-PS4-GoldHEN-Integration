@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -11,8 +10,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import aiohttp_client
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
@@ -61,7 +59,6 @@ async def _send_payload(host: str, port: int, payload: bytes, timeout: float) ->
 
 
 def _safe_payload_path(payload_file: str) -> Path:
-    # Prevent path traversal; force files to remain under /config/ps4_payloads
     p = (PAYLOAD_DIR / payload_file).resolve()
     base = PAYLOAD_DIR.resolve()
     if base not in p.parents and p != base:
@@ -76,13 +73,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _async_update() -> dict[str, Any]:
         timeout = DEFAULT_TIMEOUT
-        ok_bin = await _tcp_probe(host, binloader_port, timeout)
         ok_ftp = await _tcp_probe(host, ftp_port, timeout)
         return {
             "host": host,
             "binloader_port": binloader_port,
             "ftp_port": ftp_port,
-            "binloader_ok": ok_bin,
             "ftp_ok": ok_ftp,
         }
 
@@ -91,7 +86,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER,
         name=f"{DOMAIN}_{host}",
         update_method=_async_update,
-        update_interval=timedelta(seconds=15),
+        update_interval=timedelta(seconds=30),
     )
 
     await coordinator.async_config_entry_first_refresh()
@@ -115,7 +110,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         payload_bytes = await hass.async_add_executor_job(payload_path.read_bytes)
 
-        _LOGGER.info("Sending payload '%s' to %s:%s (%d bytes)", payload_file, override_host, override_port, len(payload_bytes))
+        _LOGGER.info(
+            "Sending payload '%s' to %s:%s (%d bytes)",
+            payload_file,
+            override_host,
+            override_port,
+            len(payload_bytes),
+        )
         await _send_payload(override_host, int(override_port), payload_bytes, timeout)
 
     hass.services.async_register(
