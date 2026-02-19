@@ -19,14 +19,19 @@ class Ps4GoldhenSensorDescription(SensorEntityDescription):
 
 SENSORS: tuple[Ps4GoldhenSensorDescription, ...] = (
     Ps4GoldhenSensorDescription(
-        key="binloader_ok",
-        name="BinLoader Reachable",
+        key="available",
+        name="Add-on Reachable",
         icon="mdi:lan-connect",
     ),
     Ps4GoldhenSensorDescription(
-        key="ftp_ok",
-        name="FTP Reachable",
-        icon="mdi:folder-network",
+        key="status",
+        name="PS4 Status",
+        icon="mdi:sony-playstation",
+    ),
+    Ps4GoldhenSensorDescription(
+        key="goldhen",
+        name="GoldHEN Status",
+        icon="mdi:script-text",
     ),
 )
 
@@ -46,19 +51,29 @@ class Ps4GoldhenSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, description: Ps4GoldhenSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
-        host = coordinator.data.get("host", "ps4")
-        self._attr_unique_id = f"{DOMAIN}_{host}_{description.key}"
+        self._attr_unique_id = f"{DOMAIN}_{description.key}"
 
     @property
     def native_value(self) -> Any:
-        # show as "on/off" text-like sensor; you can later switch to binary_sensor if desired
-        v = self.coordinator.data.get(self.entity_description.key)
-        return "on" if v else "off"
+        data = self.coordinator.data or {}
+        val = data.get(self.entity_description.key)
+        if self.entity_description.key == "available":
+            return "online" if val else "offline"
+        if val is None:
+            return "unknown"
+        return str(val)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
         return {
-            "host": self.coordinator.data.get("host"),
-            "binloader_port": self.coordinator.data.get("binloader_port"),
-            "ftp_port": self.coordinator.data.get("ftp_port"),
+            "addon_url": self.coordinator.config_entry.data.get("addon_url"),
+            "ps4_ip": data.get("ip"),
+            "ps4_mac": data.get("mac"),
+            "firmware": data.get("firmware"),
+            "goldhen_version": data.get("goldhen_version"),
         }
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success
