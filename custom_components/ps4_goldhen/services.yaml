@@ -1,0 +1,35 @@
+send_payload:
+  name: Send payload
+  description: Send a .bin payload to the PS4 GoldHEN BinLoader server over TCP.
+  fields:
+    payload_file:
+      name: Payload file
+      description: Path relative to /config/ps4_payloads (example: "ps4debug.bin" or "fan_control/ps4-fan-control.bin").
+      required: true
+      selector:
+        text:
+    host:
+      name: Host override
+      description: Optional override IP/hostname (defaults to configured PS4 host).
+      required: false
+      selector:
+        text:
+    port:
+      name: Port override
+      description: Optional override port (defaults to configured BinLoader port).
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 65535
+          mode: box
+    timeout:
+      name: Timeout seconds
+      description: Optional timeout for connect/send.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 60
+          mode: box
+          step: 1
