@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
@@ -15,110 +15,120 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .const import (
     DOMAIN,
     PLATFORMS,
-    CONF_HOST,
-    CONF_BINLOADER_PORT,
-    CONF_FTP_PORT,
+    CONF_ADDON_URL,
+    ENDPOINT_STATUS,
+    ENDPOINT_WAKE,
+    ENDPOINT_STANDBY,
+    ENDPOINT_REBOOT,
+    ENDPOINT_PAYLOAD,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-PAYLOAD_DIR = Path("/config/ps4_payloads")
+DEFAULT_TIMEOUT = 10.0
+UPDATE_INTERVAL = timedelta(seconds=30)
 
+SERVICE_WAKE = "wake"
+SERVICE_STANDBY = "standby"
+SERVICE_REBOOT = "reboot"
 SERVICE_SEND_PAYLOAD = "send_payload"
+
 SERVICE_SCHEMA_SEND_PAYLOAD = vol.Schema(
     {
-        vol.Required("payload_file"): str,  # relative to /config/ps4_payloads
-        vol.Optional("host"): str,
-        vol.Optional("port"): int,
+        vol.Required("payload_file"): str,
         vol.Optional("timeout"): vol.Coerce(float),
     }
 )
 
-DEFAULT_TIMEOUT = 10.0
+
+async def _addon_get(addon_url: str, endpoint: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """GET request to add-on API."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{addon_url}{endpoint}",
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
 
-async def _tcp_probe(host: str, port: int, timeout: float) -> bool:
-    try:
-        conn = asyncio.open_connection(host, port)
-        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-        return True
-    except Exception:
-        return False
-
-
-async def _send_payload(host: str, port: int, payload: bytes, timeout: float) -> None:
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-    try:
-        writer.write(payload)
-        await asyncio.wait_for(writer.drain(), timeout=timeout)
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
-def _safe_payload_path(payload_file: str) -> Path:
-    p = (PAYLOAD_DIR / payload_file).resolve()
-    base = PAYLOAD_DIR.resolve()
-    if base not in p.parents and p != base:
-        raise ValueError("payload_file must be within /config/ps4_payloads/")
-    return p
+async def _addon_post(
+    addon_url: str,
+    endpoint: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> dict[str, Any]:
+    """POST request to add-on API."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{addon_url}{endpoint}",
+            json=payload or {},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    host = entry.data[CONF_HOST]
-    binloader_port = entry.data[CONF_BINLOADER_PORT]
-    ftp_port = entry.data[CONF_FTP_PORT]
+    """Set up PS4 GoldHEN from a config entry."""
+    addon_url = entry.data[CONF_ADDON_URL].rstrip("/")
 
     async def _async_update() -> dict[str, Any]:
-        timeout = DEFAULT_TIMEOUT
-        ok_ftp = await _tcp_probe(host, ftp_port, timeout)
-        return {
-            "host": host,
-            "binloader_port": binloader_port,
-            "ftp_port": ftp_port,
-            "ftp_ok": ok_ftp,
-        }
+        try:
+            data = await _addon_get(addon_url, ENDPOINT_STATUS)
+            data["available"] = True
+            return data
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("PS4 add-on unreachable: %s", err)
+            return {"available": False}
 
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
-        name=f"{DOMAIN}_{host}",
+        name=f"{DOMAIN}",
         update_method=_async_update,
-        update_interval=timedelta(seconds=30),
+        update_interval=UPDATE_INTERVAL,
     )
-
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
+        "addon_url": addon_url,
     }
 
+    # ---- Service handlers ----
+
+    async def handle_wake(call: ServiceCall) -> None:
+        _LOGGER.info("PS4 wake requested")
+        result = await _addon_post(addon_url, ENDPOINT_WAKE)
+        _LOGGER.info("PS4 wake result: %s", result)
+
+    async def handle_standby(call: ServiceCall) -> None:
+        _LOGGER.info("PS4 standby requested")
+        result = await _addon_get(addon_url, ENDPOINT_STANDBY)
+        _LOGGER.info("PS4 standby result: %s", result)
+
+    async def handle_reboot(call: ServiceCall) -> None:
+        _LOGGER.info("PS4 reboot requested")
+        result = await _addon_get(addon_url, ENDPOINT_REBOOT)
+        _LOGGER.info("PS4 reboot result: %s", result)
+
     async def handle_send_payload(call: ServiceCall) -> None:
-        data = call.data
-        payload_file = data["payload_file"]
-        override_host = data.get("host") or host
-        override_port = data.get("port") or binloader_port
-        timeout = float(data.get("timeout") or DEFAULT_TIMEOUT)
-
-        payload_path = _safe_payload_path(payload_file)
-
-        if not payload_path.exists():
-            raise FileNotFoundError(f"Payload file not found: {payload_path}")
-
-        payload_bytes = await hass.async_add_executor_job(payload_path.read_bytes)
-
-        _LOGGER.info(
-            "Sending payload '%s' to %s:%s (%d bytes)",
-            payload_file,
-            override_host,
-            override_port,
-            len(payload_bytes),
+        payload_file = call.data["payload_file"]
+        timeout = float(call.data.get("timeout") or DEFAULT_TIMEOUT)
+        _LOGGER.info("Sending payload '%s' via add-on", payload_file)
+        result = await _addon_post(
+            addon_url,
+            ENDPOINT_PAYLOAD,
+            {"payload_file": payload_file},
+            timeout,
         )
-        await _send_payload(override_host, int(override_port), payload_bytes, timeout)
+        _LOGGER.info("Payload result: %s", result)
 
+    hass.services.async_register(DOMAIN, SERVICE_WAKE, handle_wake)
+    hass.services.async_register(DOMAIN, SERVICE_STANDBY, handle_standby)
+    hass.services.async_register(DOMAIN, SERVICE_REBOOT, handle_reboot)
     hass.services.async_register(
         DOMAIN,
         SERVICE_SEND_PAYLOAD,
@@ -131,10 +141,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         if not hass.data[DOMAIN]:
-            hass.services.async_remove(DOMAIN, SERVICE_SEND_PAYLOAD)
+            for svc in [SERVICE_WAKE, SERVICE_STANDBY, SERVICE_REBOOT, SERVICE_SEND_PAYLOAD]:
+                hass.services.async_remove(DOMAIN, svc)
             hass.data.pop(DOMAIN, None)
     return unload_ok
