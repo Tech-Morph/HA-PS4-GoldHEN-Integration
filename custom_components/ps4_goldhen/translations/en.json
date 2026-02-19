@@ -1,0 +1,15 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to PS4 GoldHEN",
+        "description": "Enter your PS4 IP and ports.",
+        "data": {
+          "host": "PS4 host/IP",
+          "binloader_port": "BinLoader port",
+          "ftp_port": "FTP port"
+        }
+      }
+    }
+  }
+}
