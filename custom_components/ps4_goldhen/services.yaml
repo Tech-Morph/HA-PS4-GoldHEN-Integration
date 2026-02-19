@@ -1,35 +1,34 @@
+wake:
+  name: Wake PS4
+  description: 'Wake the PS4 from standby using DDP wake-up via the GoldHEN add-on.'
+  fields: {}
+
+standby:
+  name: Put PS4 in Standby
+  description: 'Send the PS4 to standby/rest mode via the GoldHEN add-on.'
+  fields: {}
+
+reboot:
+  name: Reboot PS4
+  description: 'Reboot the PS4 via the GoldHEN add-on.'
+  fields: {}
+
 send_payload:
-  name: Send payload
-  description: 'Send a .bin payload to the PS4 GoldHEN BinLoader server over TCP.'
+  name: Send Payload
+  description: 'Send a .bin payload to the PS4 GoldHEN BinLoader via the add-on.'
   fields:
     payload_file:
       name: Payload file
-      description: 'Path relative to /config/ps4_payloads (example: "ps4debug.bin" or "fan_control/ps4-fan-control.bin").'
+      description: 'Filename of the payload (e.g. "mira.bin"). Must be placed in /addon_configs/ps4_goldhen/payloads/ on the HA host.'
       required: true
       selector:
         text:
-    host:
-      name: Host override
-      description: 'Optional override IP/hostname (defaults to configured PS4 host).'
-      required: false
-      selector:
-        text:
-    port:
-      name: Port override
-      description: 'Optional override port (defaults to configured BinLoader port).'
-      required: false
-      selector:
-        number:
-          min: 1
-          max: 65535
-          mode: box
     timeout:
-      name: Timeout seconds
-      description: 'Optional timeout for connect/send.'
+      name: Timeout (seconds)
+      description: 'How long to wait for the payload to send before giving up. Defaults to 10.'
       required: false
       selector:
         number:
-          min: 1
-          max: 60
-          mode: box
-          step: 1
+          min: 5
+          max: 120
+          unit_of_measurement: s
