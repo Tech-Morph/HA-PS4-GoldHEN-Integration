@@ -1,0 +1,10 @@
+{
+  "domain": "ps4_goldhen",
+  "name": "PS4 GoldHEN",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
