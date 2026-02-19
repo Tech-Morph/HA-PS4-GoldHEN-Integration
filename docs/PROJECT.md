@@ -38,3 +38,4 @@ Next step for you:
 
 ## Change log
 - 0.1.0: Initial HACS integration: payload sender + connectivity sensors
+- 0.1.1: Removed periodic TCP probing of BinLoader (9090) because it can destabilize GoldHEN BinLoader; only probe FTP (2121). Payload send still uses 9090 on demand.
