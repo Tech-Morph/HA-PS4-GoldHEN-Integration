@@ -5,6 +5,7 @@
   "config_flow": true,
   "dependencies": ["http", "frontend"],
   "documentation": "https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration",
+  "import_executor": true,
   "integration_type": "hub",
   "iot_class": "local_polling",
   "requirements": [],
