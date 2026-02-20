@@ -3,12 +3,14 @@ from __future__ import annotations
 DOMAIN = "ps4_goldhen"
 
 # Config entry keys
-CONF_ADDON_URL = "addon_url"  # e.g. http://192.168.1.50:8787
-CONF_PS4_HOST = "ps4_host"   # e.g. 192.168.1.14
+CONF_ADDON_URL = "addon_url"        # e.g. http://192.168.x.x:8787
+CONF_PS4_HOST = "ps4_host"          # e.g. 192.168.x.x
+CONF_BINLOADER_PORT = "binloader_port"  # default 9090
 
-# Defaults
-DEFAULT_ADDON_URL = "http://192.168.1.50:8787"
-DEFAULT_PS4_HOST = "192.168.1.14"
+# Defaults  (no real addresses stored in code)
+DEFAULT_ADDON_URL = "http://192.168.x.x:8787"
+DEFAULT_PS4_HOST = "192.168.x.x"
+DEFAULT_BINLOADER_PORT = 9090
 
 # Add-on API endpoints
 ENDPOINT_STATUS = "/status"
