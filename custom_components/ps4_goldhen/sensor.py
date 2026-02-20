@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, CONF_ADDON_URL
+from .const import DOMAIN, CONF_ADDON_URL, CONF_PS4_HOST, CONF_BINLOADER_PORT
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -42,14 +42,20 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([Ps4GoldhenSensor(coordinator, desc) for desc in SENSORS])
+    async_add_entities([Ps4GoldhenSensor(coordinator, entry, desc) for desc in SENSORS])
 
 
 class Ps4GoldhenSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator, description: Ps4GoldhenSensorDescription) -> None:
+    def __init__(
+        self,
+        coordinator,
+        entry: ConfigEntry,
+        description: Ps4GoldhenSensorDescription,
+    ) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self.entity_description = description
         self._attr_unique_id = f"{DOMAIN}_{description.key}"
 
@@ -66,9 +72,11 @@ class Ps4GoldhenSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
+        entry_data = self._entry.data
         return {
-            "addon_url": self.coordinator.config_entry.data.get(CONF_ADDON_URL),
-            "ps4_ip": data.get("ip"),
+            "addon_url": entry_data.get(CONF_ADDON_URL),
+            "ps4_host": entry_data.get(CONF_PS4_HOST),
+            "binloader_port": entry_data.get(CONF_BINLOADER_PORT),
             "ps4_mac": data.get("mac"),
             "firmware": data.get("firmware"),
             "goldhen_version": data.get("goldhen_version"),
