@@ -3,9 +3,37 @@
     "step": {
       "user": {
         "title": "Connect to PS4 GoldHEN Add-on",
-        "description": "Enter the URL of your PS4 GoldHEN add-on (e.g. http://192.168.1.50:8787). Make sure the add-on is installed and running first.",
+        "description": "Enter the details for your PS4 GoldHEN add-on and PS4 console. Make sure the add-on is installed and running first.",
         "data": {
-          "addon_url": "Add-on URL"
+          "addon_url": "Add-on URL",
+          "ps4_host": "PS4 IP Address",
+          "binloader_port": "BinLoader Port"
+        },
+        "data_description": {
+          "addon_url": "URL of the GoldHEN add-on (e.g. http://192.168.x.x:8787)",
+          "ps4_host": "IP address of your PS4 (e.g. 192.168.x.x)",
+          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)"
+        }
+      }
+    },
+    "error": {
+      "addon_not_reachable": "Cannot reach the PS4 GoldHEN add-on. Check the URL and make sure the add-on is running."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PS4 GoldHEN Settings",
+        "description": "Update the connection settings for your PS4 GoldHEN add-on.",
+        "data": {
+          "addon_url": "Add-on URL",
+          "ps4_host": "PS4 IP Address",
+          "binloader_port": "BinLoader Port"
+        },
+        "data_description": {
+          "addon_url": "URL of the GoldHEN add-on (e.g. http://192.168.x.x:8787)",
+          "ps4_host": "IP address of your PS4 (e.g. 192.168.x.x)",
+          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)"
         }
       }
     },
