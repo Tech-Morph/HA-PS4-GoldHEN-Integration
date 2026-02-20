@@ -239,8 +239,7 @@ class PS4FTPUploadView(HomeAssistantView):
             import ftplib
             with ftplib.FTP() as ftp:
                 ftp.connect(host, port, timeout=15)
-                ftp.login()Complete __init__.py with services, panel registration, and FTP upload view            
-                
+                ftp.login()
                 ftp.storbinary(f"STOR {full_dest_path}", io.BytesIO(file_data))
 
         try:
