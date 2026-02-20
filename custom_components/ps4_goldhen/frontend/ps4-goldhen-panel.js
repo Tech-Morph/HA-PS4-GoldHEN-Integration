@@ -59,7 +59,6 @@ class PS4GoldHENPanel extends HTMLElement {
   async _loadDir(path = this._path) {
     this._path = path;
     try {
-      // Use the FTP listing feature implemented in the coordinator/websocket
       const result = await this._hass.callWS({
         type: "ps4_goldhen/ftp_list_dir",
         entry_id: this._panel.config.entry_id,
@@ -77,7 +76,7 @@ class PS4GoldHENPanel extends HTMLElement {
     this._render();
     try {
       await this._hass.callService("ps4_goldhen", "send_payload", {
-        payload: this._selectedPayload
+        payload_file: this._selectedPayload
       });
       this._statusMsg = "Payload sent successfully!";
     } catch (err) {
@@ -90,27 +89,20 @@ class PS4GoldHENPanel extends HTMLElement {
     const fileInput = this.shadowRoot.getElementById("pkg-upload");
     const file = fileInput.files[0];
     if (!file) return;
-
     this._statusMsg = `Uploading ${file.name} to HA...`;
     this._render();
-
     const formData = new FormData();
     formData.append("file", file);
-
     try {
       const resp = await fetch("/api/ps4_goldhen/upload", {
         method: "POST",
         body: formData,
         headers: { "Authorization": "Bearer " + this._hass.auth.data.access_token }
       });
-
       if (resp.ok) {
         const res = await resp.json();
         this._statusMsg = `File uploaded. Triggering ${this._installMethod.toUpperCase()} install...`;
         this._render();
-
-        // After uploading to HA, trigger the installation service
-        // If method is 'goldhen', the backend will handle the second upload to the PS4
         await this._hass.callService("ps4_goldhen", "install_pkg", {
           url: res.filename,
           method: this._installMethod
@@ -129,13 +121,18 @@ class PS4GoldHENPanel extends HTMLElement {
   async _handleInstallFtp(name, method) {
     const fullPath = (this._path === "/" ? "" : this._path) + "/" + name;
     if (!confirm(`Install ${name} via ${method.toUpperCase()}?`)) return;
-
     this._statusMsg = `Triggering ${method.toUpperCase()} install for ${name}...`;
     this._render();
+    
+    let ps4Ip = "PS4_IP";
+    const sensor = Object.values(this._hass.states).find(s => s.entity_id.includes("goldhen_ftp"));
+    if (sensor && sensor.attributes.ps4_host) {
+      ps4Ip = sensor.attributes.ps4_host;
+    }
 
     try {
       await this._hass.callService("ps4_goldhen", "install_pkg", {
-        url: `ftp://ps4:ps4@PS4_IP:2121${fullPath}`, // Backend extracts name for GoldHEN mode
+        url: `ftp://ps4:ps4@${ps4Ip}:2121${fullPath}`,
         method: method
       });
       this._statusMsg = `${method.toUpperCase()} install triggered!`;
@@ -183,7 +180,6 @@ class PS4GoldHENPanel extends HTMLElement {
               </select>
               <button id="send-payload-btn" ${!this._selectedPayload ? 'disabled' : ''}>Send Payload</button>
             </div>
-
             <div class="section">
               <h3>📦 Install PKG</h3>
               <p>Upload and install a .pkg file from your computer.</p>
@@ -227,14 +223,14 @@ class PS4GoldHENPanel extends HTMLElement {
       </ha-card>
     `;
 
-    // Listeners
     if (isDashboard) {
       this.shadowRoot.getElementById("payload-select")?.addEventListener("change", (e) => {
         this._selectedPayload = e.target.value;
         this._render();
       });
       this.shadowRoot.querySelectorAll('input[name="method"]').forEach(radio => {
-        radio.addEventListener("change", (e) => { this._installMethod = e.target.value; });
+        radio.add
+      
       });
       this.shadowRoot.getElementById("send-payload-btn")?.addEventListener("click", () => this._handleSendPayload());
       this.shadowRoot.getElementById("upload-pkg-btn")?.addEventListener("click", () => this._handleUploadPkg());
