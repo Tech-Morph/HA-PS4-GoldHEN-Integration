@@ -2,43 +2,47 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to PS4 GoldHEN Add-on",
-        "description": "Enter the details for your PS4 GoldHEN add-on and PS4 console. Make sure the add-on is installed and running first.",
+        "title": "Connect to PS4 GoldHEN",
+        "description": "Enter the connection details for your PS4. GoldHEN must be running with the BinLoader and FTP services active.",
         "data": {
-          "addon_url": "Add-on URL",
           "ps4_host": "PS4 IP Address",
-          "binloader_port": "BinLoader Port"
+          "binloader_port": "BinLoader Port",
+          "ftp_port": "FTP Port",
+          "goldhen_port": "GoldHEN HTTP API Port"
         },
         "data_description": {
-          "addon_url": "URL of the GoldHEN add-on (e.g. http://192.168.x.x:8787)",
-          "ps4_host": "IP address of your PS4 (e.g. 192.168.x.x)",
-          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)"
+          "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
+          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)",
+          "ftp_port": "Port GoldHEN FTP server listens on (default: 2121)",
+          "goldhen_port": "Port GoldHEN HTTP API listens on for power commands (default: 12800)"
         }
       }
     },
     "error": {
-      "addon_not_reachable": "Cannot reach the PS4 GoldHEN add-on. Check the URL and make sure the add-on is running."
+      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP address and make sure GoldHEN is running with FTP enabled."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "PS4 GoldHEN Settings",
-        "description": "Update the connection settings for your PS4 GoldHEN add-on.",
+        "description": "Update the connection settings for your PS4 GoldHEN integration.",
         "data": {
-          "addon_url": "Add-on URL",
           "ps4_host": "PS4 IP Address",
-          "binloader_port": "BinLoader Port"
+          "binloader_port": "BinLoader Port",
+          "ftp_port": "FTP Port",
+          "goldhen_port": "GoldHEN HTTP API Port"
         },
         "data_description": {
-          "addon_url": "URL of the GoldHEN add-on (e.g. http://192.168.x.x:8787)",
-          "ps4_host": "IP address of your PS4 (e.g. 192.168.x.x)",
-          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)"
+          "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
+          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)",
+          "ftp_port": "Port GoldHEN FTP server listens on (default: 2121)",
+          "goldhen_port": "Port GoldHEN HTTP API listens on for power commands (default: 12800)"
         }
       }
     },
     "error": {
-      "addon_not_reachable": "Cannot reach the PS4 GoldHEN add-on. Check the URL and make sure the add-on is running."
+      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP address and make sure GoldHEN is running with FTP enabled."
     }
   }
 }
