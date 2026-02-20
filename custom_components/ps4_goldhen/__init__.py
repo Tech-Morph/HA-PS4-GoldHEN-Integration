@@ -1,14 +1,19 @@
+"""The PS4 GoldHEN Integration."""
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 from datetime import timedelta
 from typing import Any
 
+from aiohttp import web
 import voluptuous as vol
 
-from homeassistant.components import websocket_api
+from homeassistant.components import frontend, panel_custom, websocket_api
+from homeassistant.components.frontend import StaticPathConfig
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -47,13 +52,7 @@ _SEND_PAYLOAD_SCHEMA = vol.Schema(
     }
 )
 
-
-async def _send_bin_tcp(
-    host: str,
-    port: int,
-    filepath: str,
-    timeout: float = 30.0,
-) -> None:
+async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
     """Stream a local .bin file to host:port over a raw TCP connection."""
     if not os.path.isfile(filepath):
         raise HomeAssistantError(f"Payload file not found: {filepath}")
@@ -66,11 +65,15 @@ async def _send_bin_tcp(
             asyncio.open_connection(host, port), timeout=timeout
         )
     except (asyncio.TimeoutError, OSError) as err:
-        raise HomeAssistantError(f"Cannot reach BinLoader at {host}:{port}: {err}") from err
+        raise HomeAssistantError(
+            f"Cannot reach BinLoader at {host}:{port}: {err}"
+        ) from err
 
     try:
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, lambda: open(filepath, "rb").read())
+        data = await loop.run_in_executor(
+            None, lambda: open(filepath, "rb").read()
+        )
         writer.write(data)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
     finally:
@@ -79,8 +82,8 @@ async def _send_bin_tcp(
             await writer.wait_closed()
         except Exception:  # noqa: BLE001
             pass
-    _LOGGER.info("Payload sent successfully.")
 
+    _LOGGER.info("Payload sent successfully.")
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PS4 GoldHEN integration from a config entry."""
@@ -96,10 +99,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:  # noqa: BLE001
+            except Exception: # noqa: BLE001
                 pass
             return {"ftp_reachable": True}
-        except Exception:  # noqa: BLE001
+        except Exception: # noqa: BLE001
             return {"ftp_reachable": False}
 
     coordinator = DataUpdateCoordinator(
@@ -109,6 +112,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_method=_poll_ftp,
         update_interval=_FTP_POLL_INTERVAL,
     )
+
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
@@ -120,7 +124,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     # ── Service ───────────────────────────────────────────────────────────────────
-
     async def handle_send_payload(call: ServiceCall) -> None:
         p_file = call.data["payload_file"]
         t_host = call.data.get("ps4_host") or host
@@ -131,48 +134,103 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _send_bin_tcp(t_host, t_port, filepath, timeout)
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
+        hass.services.async_register(
+            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA
+        )
 
     # ── WebSocket & Panel ──────────────────────────────────────────────────────────
-
     from .websocket import async_setup as async_setup_websocket
     async_setup_websocket(hass)
 
-    hass.components.frontend.async_register_built_in_panel(
-        component_name="custom",
+    # Register the FTP Download View
+    hass.http.register_view(PS4FTPDownloadView())
+
+    # Serve the JS file asynchronously
+    js_path = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                js_path,
+                hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
+                False
+            )
+        ]
+    )
+
+    # Register the panel via panel_custom
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path="ps4_ftp",
+        webcomponent_name="ps4-goldhen-panel",
+        module_url=js_path,
         sidebar_title="PS4 FTP",
         sidebar_icon="mdi:folder-network",
-        url_path="ps4_ftp",
-        config={
-            "entry_id": entry.entry_id,
-            "module_url": f"/api/ps4_goldhen/frontend/ps4-goldhen-panel.js",
-            "name": "ps4-goldhen-panel"
-        },
+        config={"entry_id": entry.entry_id},
         require_admin=False,
-    )
-    
-    # We also need to serve the JS file
-    hass.http.register_static_path(
-        "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js",
-        hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
     return True
 
+class PS4FTPDownloadView(HomeAssistantView):
+    """View to download/view files from PS4 via FTP."""
+    url = "/api/ps4_goldhen/ftp/download"
+    name = "api:ps4_goldhen:ftp_download"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle download request."""
+        import ftplib
+        hass = request.app["hass"]
+        entry_id = request.query.get("entry_id")
+        path = request.query.get("path")
+        
+        if not entry_id or not path:
+            return web.Response(text="Missing entry_id or path", status=400)
+            
+        data = hass.data[DOMAIN].get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+            
+        host = data["host"]
+        port = int(data.get("ftp_port", 2121))
+        
+        def _get_file():
+            buffer = io.BytesIO()
+            with ftplib.FTP() as ftp:
+                ftp.connect(host, port, timeout=15)
+                ftp.login()
+                ftp.retrbinary(f"RETR {path}", buffer.write)
+            buffer.seek(0)
+            return buffer.read()
+
+        try:
+            content = await hass.async_add_executor_job(_get_file)
+            filename = os.path.basename(path)
+            return web.Response(
+                body=content,
+                content_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        except Exception as err:
+            return web.Response(text=f"FTP Error: {err}", status=500)
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload the entry when the user saves new options."""
     await hass.config_entries.async_reload(entry.entry_id)
 
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and clean up."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        # Remove the panel when the integration is unloaded
+        frontend.async_remove_panel(hass, "ps4_ftp")
+        
         hass.data[DOMAIN].pop(entry.entry_id, None)
         if not hass.data[DOMAIN]:
             hass.services.async_remove(DOMAIN, _SVC_SEND_PAYLOAD)
             hass.data.pop(DOMAIN, None)
+            
     return unload_ok
