@@ -57,15 +57,14 @@ async def _send_payload(
     """Send a binary payload to PS4 BinLoader via raw TCP."""
     if not os.path.exists(payload_path):
         raise HomeAssistantError(f"Payload file not found: {payload_path}")
-
     _LOGGER.info("Sending payload %s to %s:%d", payload_path, host, port)
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=TCP_PROBE_TIMEOUT
         )
         try:
-            with open(payload_path, "rb") as f:
-                writer.write(f.read())
+            with open(payload_path, "rb") as fh:
+                writer.write(fh.read())
                 await writer.drain()
         finally:
             writer.close()
@@ -77,10 +76,9 @@ async def _send_payload(
 async def _ftp_upload_to_ps4(
     hass: HomeAssistant, host: str, port: int, filename: str
 ) -> str:
-    """Upload a PKG from HA payload dir to PS4 /data/pkg/ via GoldHEN FTP.
+    """Upload a PKG file from HA payload dir to PS4 /data/pkg/ via GoldHEN FTP.
 
-    Returns the FTP URL of the uploaded file on the PS4 for use with the
-    GoldHEN internal package installer (hdd:/data/pkg/).
+    Returns the remote path on the PS4, e.g. '/data/pkg/game.pkg'.
     """
     source_path = hass.config.path(PAYLOAD_DIR, filename)
     if not os.path.exists(source_path):
@@ -88,25 +86,24 @@ async def _ftp_upload_to_ps4(
             f"PKG '{filename}' not found in {PAYLOAD_DIR}. "
             "Upload it to HA first via the panel."
         )
+    _LOGGER.info(
+        "FTP upload: %s -> PS4 /data/pkg/ (%s:%d)", filename, host, port
+    )
 
-    _LOGGER.info("Uploading %s to PS4 FTP (%s:%d) -> /data/pkg/", filename, host, port)
-
-    def _do_ftp_upload() -> None:
+    def _do_upload() -> None:
         from ftplib import FTP, error_perm
         with FTP() as ftp:
             ftp.connect(host, port, timeout=30)
             ftp.login("ps4", "ps4")
-            # Ensure /data/pkg/ exists
             try:
                 ftp.mkd("/data/pkg")
             except error_perm:
-                pass  # already exists
+                pass  # directory already exists
             ftp.cwd("/data/pkg")
-            with open(source_path, "rb") as f:
-                _LOGGER.info("Starting FTP STOR for %s", filename)
-                ftp.storbinary(f"STOR {filename}", f)
+            with open(source_path, "rb") as fh:
+                ftp.storbinary(f"STOR {filename}", fh)
 
-    await hass.async_add_executor_job(_do_ftp_upload)
+    await hass.async_add_executor_job(_do_upload)
     _LOGGER.info("FTP upload complete: /data/pkg/%s", filename)
     return f"/data/pkg/{filename}"
 
@@ -114,25 +111,23 @@ async def _ftp_upload_to_ps4(
 async def _goldhen_install_pkg(
     hass: HomeAssistant, host: str, rpi_port: int, pkg_path_on_ps4: str
 ) -> None:
-    """Trigger GoldHEN's built-in package installer via its RPI-compatible API.
+    """Trigger GoldHEN's built-in package installer (no RPI homebrew app needed).
 
-    GoldHEN exposes an HTTP endpoint on the RPI port (default 12800) that
-    accepts a JSON body with a package URL.  When the URL starts with
-    'ftp://' or points to a local path already on the PS4 we pass it directly.
-    GoldHEN will install the package from its internal HDD storage.
+    GoldHEN v2.3+ exposes an RPI-compatible HTTP endpoint.  We build an
+    ftp:// URL pointing at the file we already uploaded to the PS4's own
+    /data/pkg/ directory and POST it to the endpoint.  GoldHEN installs
+    the package directly from its internal storage.
     """
     import aiohttp
-    url = f"http://{host}:{rpi_port}/api/install"
-    # GoldHEN's RPI-compatible endpoint accepts ftp:// URLs referring to the
-    # PS4's own storage so we build one pointing at /data/pkg/<filename>.
-    pkg_url = f"ftp://ps4:ps4@{host}:2121{pkg_path_on_ps4}"
-    payload = {"type": "direct", "packages": [pkg_url]}
+    api_url = f"http://{host}:{rpi_port}/api/install"
+    pkg_ftp_url = f"ftp://ps4:ps4@{host}:2121{pkg_path_on_ps4}"
+    body = {"type": "direct", "packages": [pkg_ftp_url]}
     _LOGGER.info(
-        "Triggering GoldHEN internal install: POST %s | packages=%s", url, pkg_url
+        "GoldHEN install: POST %s  pkg=%s", api_url, pkg_ftp_url
     )
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=20) as resp:
+            async with session.post(api_url, json=body, timeout=20) as resp:
                 text = await resp.text()
                 if resp.status not in (200, 204):
                     raise HomeAssistantError(
@@ -143,7 +138,7 @@ async def _goldhen_install_pkg(
         raise
     except Exception as err:
         raise HomeAssistantError(
-            f"Failed to contact GoldHEN installer at {url}: {err}"
+            f"Could not reach GoldHEN installer at {api_url}: {err}"
         ) from err
 
 
@@ -152,21 +147,21 @@ async def _remote_install_pkg(
 ) -> None:
     """Trigger install via Remote Package Installer (RPI) homebrew app."""
     import aiohttp
-    target_url = f"http://{host}:{port}/api/install"
+    api_url = f"http://{host}:{port}/api/install"
+    body = {"type": "direct", "packages": [url]}
     try:
         async with aiohttp.ClientSession() as session:
-            payload = {"type": "direct", "packages": [url]}
-            async with session.post(target_url, json=payload, timeout=20) as response:
-                text = await response.text()
-                if response.status not in (200, 204):
+            async with session.post(api_url, json=body, timeout=20) as resp:
+                text = await resp.text()
+                if resp.status not in (200, 204):
                     raise HomeAssistantError(
-                        f"RPI installer error (HTTP {response.status}): {text}"
+                        f"RPI installer error (HTTP {resp.status}): {text}"
                     )
     except HomeAssistantError:
         raise
     except Exception as err:
         raise HomeAssistantError(
-            f"Failed to trigger RPI installation: {err}"
+            f"Failed to reach RPI at {api_url}: {err}"
         ) from err
 
 
@@ -212,23 +207,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_install_pkg(call: ServiceCall):
         """Handle the install_pkg service call.
 
-        method='rpi'      – send URL to Remote Package Installer homebrew
-        method='goldhen'  – upload PKG to PS4 via FTP then trigger
-                            GoldHEN's internal package installer (no RPI app needed)
+        method='rpi'     - send URL to Remote Package Installer homebrew app
+        method='goldhen' - upload PKG to PS4 via FTP then trigger GoldHEN's
+                           internal package installer (no RPI app needed)
         """
         url = call.data["url"]
         method = call.data.get("method", "rpi")
         p_host = call.data.get("host", host)
 
         if method == "goldhen":
-            # url is expected to be just the filename (e.g. "game.pkg") or a
-            # full ftp path.  We always re-upload to guarantee the file is in
-            # the right place on the PS4.
             filename = url.split("/")[-1]
             pkg_path = await _ftp_upload_to_ps4(hass, p_host, ftp_port, filename)
             await _goldhen_install_pkg(hass, p_host, rpi_port, pkg_path)
         else:
-            # method == 'rpi'  (default)
             p_port = call.data.get("port", rpi_port)
             await _remote_install_pkg(hass, p_host, p_port, url)
 
@@ -274,7 +265,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 class PS4PayloadView(HomeAssistantView):
-    """List .bin and .pkg files available in HA's payload directory."""
+    """List .bin and .pkg files in HA's payload directory."""
 
     url = "/api/ps4_goldhen/payloads"
     name = "api:ps4_goldhen:payloads"
@@ -292,7 +283,7 @@ class PS4PayloadView(HomeAssistantView):
 
 
 class PS4UploadView(HomeAssistantView):
-    """Accept a multipart file upload and save it to HA's payload directory."""
+    """Accept multipart upload, save to HA payload directory."""
 
     url = "/api/ps4_goldhen/upload"
     name = "api:ps4_goldhen:upload"
@@ -304,8 +295,7 @@ class PS4UploadView(HomeAssistantView):
         file = data.get("file")
         if not file:
             return web.json_response({"error": "no file provided"}, status=400)
-
         dest = hass.config.path(PAYLOAD_DIR, file.filename)
-        with open(dest, "wb") as f:
-            f.write(file.file.read())
+        with open(dest, "wb") as fh:
+            fh.write(file.file.read())
         return web.json_response({"status": "ok", "filename": file.filename})
