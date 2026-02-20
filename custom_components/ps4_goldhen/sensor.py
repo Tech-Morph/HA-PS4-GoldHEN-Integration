@@ -1,38 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, CONF_ADDON_URL, CONF_PS4_HOST, CONF_BINLOADER_PORT
-
-
-@dataclass(frozen=True, kw_only=True)
-class Ps4GoldhenSensorDescription(SensorEntityDescription):
-    key: str
-
-
-SENSORS: tuple[Ps4GoldhenSensorDescription, ...] = (
-    Ps4GoldhenSensorDescription(
-        key="available",
-        name="Add-on Reachable",
-        icon="mdi:lan-connect",
-    ),
-    Ps4GoldhenSensorDescription(
-        key="status",
-        name="PS4 Status",
-        icon="mdi:sony-playstation",
-    ),
-    Ps4GoldhenSensorDescription(
-        key="goldhen",
-        name="GoldHEN Status",
-        icon="mdi:script-text",
-    ),
+from .const import (
+    DOMAIN,
+    CONF_PS4_HOST,
+    CONF_BINLOADER_PORT,
+    CONF_FTP_PORT,
+    DEFAULT_BINLOADER_PORT,
+    DEFAULT_FTP_PORT,
 )
 
 
@@ -41,47 +23,63 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Create the sensors for this config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([Ps4GoldhenSensor(coordinator, entry, desc) for desc in SENSORS])
+    async_add_entities(
+        [
+            PS4FTPSensor(coordinator, entry),
+        ]
+    )
 
 
-class Ps4GoldhenSensor(CoordinatorEntity, SensorEntity):
+class PS4FTPSensor(CoordinatorEntity, SensorEntity):
+    """
+    Sensor: GoldHEN FTP reachability.
+
+    Reports "online" when a TCP connection to the FTP port (default 2121)
+    succeeds, and "offline" otherwise.
+
+    NOTE: BinLoader (9090) is intentionally NOT probed on a schedule because
+    repeated connections can destabilise the GoldHEN BinLoader service.
+    Payloads are only sent on demand via the ps4_goldhen.send_payload service.
+    """
+
     _attr_has_entity_name = True
+    _attr_icon = "mdi:sony-playstation"
 
     def __init__(
         self,
         coordinator,
         entry: ConfigEntry,
-        description: Ps4GoldhenSensorDescription,
     ) -> None:
         super().__init__(coordinator)
         self._entry = entry
-        self.entity_description = description
-        self._attr_unique_id = f"{DOMAIN}_{description.key}"
+        host = entry.data[CONF_PS4_HOST]
+        # Unique ID ensures this sensor survives restarts and re-imports
+        self._attr_unique_id = f"{DOMAIN}_{host}_ftp"
+        self._attr_name = "GoldHEN FTP"
 
     @property
-    def native_value(self) -> Any:
+    def native_value(self) -> str:
+        """Return 'online' or 'offline' based on the FTP TCP probe."""
         data = self.coordinator.data or {}
-        val = data.get(self.entity_description.key)
-        if self.entity_description.key == "available":
-            return "online" if val else "offline"
-        if val is None:
-            return "unknown"
-        return str(val)
+        return "online" if data.get("ftp_reachable") else "offline"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        """Expose connection details as attributes."""
         entry_data = self._entry.data
         return {
-            "addon_url": entry_data.get(CONF_ADDON_URL),
             "ps4_host": entry_data.get(CONF_PS4_HOST),
-            "binloader_port": entry_data.get(CONF_BINLOADER_PORT),
-            "ps4_mac": data.get("mac"),
-            "firmware": data.get("firmware"),
-            "goldhen_version": data.get("goldhen_version"),
+            "ftp_port": entry_data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
+            "binloader_port": entry_data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
+            "note": (
+                "BinLoader port is not polled on a schedule; "
+                "use ps4_goldhen.send_payload to send payloads on demand."
+            ),
         }
 
     @property
     def available(self) -> bool:
+        """Sensor is always available as long as HA can run the coordinator."""
         return self.coordinator.last_update_success
