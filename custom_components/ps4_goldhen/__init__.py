@@ -6,13 +6,15 @@ import ftplib
 from datetime import timedelta
 from aiohttp import web
 import voluptuous as vol
+
 from homeassistant.components import frontend, websocket_api
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
 from .const import (
     DOMAIN,
     PLATFORMS,
@@ -59,10 +61,12 @@ class PS4PayloadView(HomeAssistantView):
     async def get(self, request):
         hass = request.app["hass"]
         path = hass.config.path(PAYLOAD_DIR)
+
         def _get_files():
             if not os.path.exists(path):
                 return []
             return [f for f in os.listdir(path) if f.endswith(".bin") or f.endswith(".pkg")]
+
         files = await hass.async_add_executor_job(_get_files)
         return web.json_response(files)
 
@@ -78,11 +82,14 @@ class PS4UploadView(HomeAssistantView):
         file = data.get("file")
         if not file:
             return web.json_response({"error": "no file provided"}, status=400)
+
         filename = file.filename
         dest = hass.config.path(PAYLOAD_DIR, filename)
+
         def _save_file():
             with open(dest, "wb") as fh:
                 fh.write(file.file.read())
+
         await hass.async_add_executor_job(_save_file)
         return web.json_response({"status": "ok", "filename": filename})
 
@@ -99,9 +106,11 @@ async def websocket_ftp_list_dir(hass, connection, msg):
     """Handle FTP directory listing via websocket."""
     entry_id = msg["entry_id"]
     path = msg["path"]
+
     if entry_id not in hass.data[DOMAIN]:
         connection.send_error(msg["id"], "entry_not_found", "Config entry not found")
         return
+
     data = hass.data[DOMAIN][entry_id]
     host = data["host"]
     port = data["ftp_port"]
@@ -116,13 +125,16 @@ async def websocket_ftp_list_dir(hass, connection, msg):
                 ftp.cwd(path)
                 lines = []
                 ftp.retrlines('LIST', lines.append)
+
                 for line in lines:
                     parts = line.split(None, 8)
-                    if len(parts) < 9: continue
+                    if len(parts) < 9:
+                        continue
                     is_dir = parts[0].startswith('d')
                     size = parts[4] if not is_dir else ""
                     name = parts[8]
-                    if name in ('.', '..'): continue
+                    if name in ('.', '..'):
+                        continue
                     entries.append({
                         "name": name,
                         "is_dir": is_dir,
@@ -145,9 +157,12 @@ async def _send_payload(
     """Send a binary payload to PS4 BinLoader via raw TCP."""
     def _check_file():
         return os.path.exists(payload_path)
+
     if not await hass.async_add_executor_job(_check_file):
         raise HomeAssistantError(f"Payload file not found: {payload_path}")
+
     _LOGGER.info("Sending payload %s to %s:%d (timeout=%d)", payload_path, host, port, timeout)
+
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
@@ -170,9 +185,11 @@ async def _ftp_upload_to_ps4(
 ) -> str:
     """Upload a PKG file from HA payload dir to PS4 /data/pkg/ via GoldHEN FTP."""
     source_path = hass.config.path(PAYLOAD_DIR, filename)
+
     def _do_upload() -> None:
         if not os.path.exists(source_path):
             raise FileNotFoundError(source_path)
+
         from ftplib import FTP, error_perm
         with FTP() as ftp:
             ftp.connect(host, port, timeout=30)
@@ -184,12 +201,14 @@ async def _ftp_upload_to_ps4(
             ftp.cwd("/data/pkg")
             with open(source_path, "rb") as fh:
                 ftp.storbinary(f"STOR {filename}", fh)
+
     try:
         await hass.async_add_executor_job(_do_upload)
     except FileNotFoundError:
         raise HomeAssistantError(f"PKG '{filename}' not found.")
     except Exception as err:
         raise HomeAssistantError(f"FTP upload failed: {err}") from err
+
     return f"/data/pkg/{filename}"
 
 async def _goldhen_install_pkg(
@@ -199,6 +218,7 @@ async def _goldhen_install_pkg(
     api_url = f"http://{host}:{rpi_port}/api/install"
     pkg_ftp_url = f"ftp://ps4:ps4@{host}:2121{pkg_path_on_ps4}"
     body = {"type": "direct", "packages": [pkg_ftp_url]}
+
     try:
         session = async_get_clientsession(hass)
         async with session.post(api_url, json=body, timeout=20) as resp:
@@ -214,6 +234,7 @@ async def _remote_install_pkg(
     """Trigger install via Remote Package Installer (RPI) homebrew app."""
     api_url = f"http://{host}:{port}/api/install"
     body = {"type": "direct", "packages": [url]}
+
     try:
         session = async_get_clientsession(hass)
         async with session.post(api_url, json=body, timeout=20) as resp:
@@ -229,11 +250,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
     ftp_port = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
     rpi_port = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
+
     payload_dir = hass.config.path(PAYLOAD_DIR)
 
     def _create_dir():
         if not os.path.exists(payload_dir):
             os.makedirs(payload_dir, exist_ok=True)
+
     await hass.async_add_executor_job(_create_dir)
 
     async def _async_update_data():
@@ -255,6 +278,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_method=_async_update_data,
         update_interval=_FTP_POLL_INTERVAL,
     )
+
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
@@ -279,6 +303,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         url = call.data["url"]
         method = call.data.get("method", "rpi")
         p_host = call.data.get("ps4_host", host)
+
         if method == "goldhen":
             filename = url.split("/")[-1]
             pkg_path = await _ftp_upload_to_ps4(hass, p_host, ftp_port, filename)
@@ -299,7 +324,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     websocket_api.async_register_command(hass, websocket_ftp_list_dir)
 
     frontend_path = hass.config.path("custom_components/ps4_goldhen/frontend")
-    hass.http.register_static_path("/ps4_goldhen_static", frontend_path, cache_headers=False)
+    await hass.http.async_register_static_paths([
+        StaticPathConfig("/ps4_goldhen_static", frontend_path, False)
+    ])
 
     frontend.async_register_panel(
         hass,
@@ -323,4 +350,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         frontend.async_remove_panel(hass, "ps4-goldhen")
         hass.data[DOMAIN].pop(entry.entry_id)
+
     return unload_ok
