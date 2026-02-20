@@ -11,11 +11,11 @@ from typing import Any
 from aiohttp import web
 import voluptuous as vol
 
-from homeassistant.components import frontend, panel_custom, websocket_api
+from homeassistant.components import frontend, panel_custom
 from homeassistant.components.frontend import StaticPathConfig
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
