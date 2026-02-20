@@ -212,13 +212,13 @@ class PS4GoldHENPanel extends HTMLElement {
         <div class="path">PS4 FTP: ${this._path}</div>
         <div class="nav-btns">
           <button id="btn-root">Root</button>
-          <button id="btn-up">Up</button>
+          <button id="btn-back">Back</button>
           <button id="btn-refresh">Refresh</button>
         </div>
         <div class="upload-section">
           <input type="file" id="upload-input" style="display:none">
           <button id="btn-select">Select File</button>
-          <button id="btn-upload">Upload to Current Folder</button>
+          <button id="btn-backload">Upload to Current Folder</button>
         </div>
       </div>
 
@@ -300,12 +300,12 @@ class PS4GoldHENPanel extends HTMLElement {
 
     // Buttons
     this.shadowRoot.querySelector("#btn-root").onclick = () => this._loadDir("/");
-    this.shadowRoot.querySelector("#btn-up").onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
+    this.shadowRoot.querySelector("#btn-back").onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
     this.shadowRoot.querySelector("#btn-refresh").onclick = () => this._loadDir();
     
     const btnSelect = this.shadowRoot.querySelector("#btn-select");
     const uploadInput = this.shadowRoot.querySelector("#upload-input");
-    const btnUpload = this.shadowRoot.querySelector("#btn-upload");
+    const btnUpload = this.shadowRoot.querySelector("#btn-backload");
     
     if (btnSelect) btnSelect.onclick = () => uploadInput.click();
     if (btnUpload) btnUpload.onclick = () => this._uploadFile();
