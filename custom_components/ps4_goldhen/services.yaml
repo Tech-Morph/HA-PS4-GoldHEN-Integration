@@ -1,38 +1,31 @@
-wake:
-  name: Wake PS4
-  description: 'Wake the PS4 from standby using DDP wake-up via the GoldHEN add-on.'
-  fields: {}
-
-standby:
-  name: Put PS4 in Standby
-  description: 'Send the PS4 to standby/rest mode via the GoldHEN add-on.'
-  fields: {}
-
-reboot:
-  name: Reboot PS4
-  description: 'Reboot the PS4 via the GoldHEN add-on.'
-  fields: {}
-
 send_payload:
   name: Send Payload
-  description: 'Send a .bin payload to the PS4 GoldHEN BinLoader via the add-on. The PS4 IP and BinLoader port default to the values set during integration setup, but can be overridden per call.'
+  description: >-
+    Stream a .bin payload file to the PS4 GoldHEN BinLoader over TCP.
+    The file must exist on the Home Assistant host at the path specified
+    (absolute) or inside /config/ps4_payloads/ (bare filename).
   fields:
     payload_file:
       name: Payload File
-      description: 'Filename of the .bin payload (e.g. "mira.bin"). Must be placed in /config/ps4_payloads/ on the HA host.'
+      description: >-
+        Filename (e.g. goldhen.bin) relative to /config/ps4_payloads/,
+        or an absolute path on the HA host.
       required: true
+      example: goldhen.bin
       selector:
         text:
     ps4_host:
-      name: PS4 IP Address (override)
-      description: 'Override the PS4 IP address for this payload send. Leave blank to use the value from integration setup.'
+      name: PS4 Host (optional)
+      description: Override the PS4 IP for this call. Defaults to the configured host.
       required: false
+      example: 192.168.1.100
       selector:
         text:
     binloader_port:
-      name: BinLoader Port (override)
-      description: 'Override the BinLoader port for this payload send. Leave blank to use the value from integration setup (default: 9090).'
+      name: BinLoader Port (optional)
+      description: Override the BinLoader TCP port. Defaults to the configured port.
       required: false
+      example: 9090
       selector:
         number:
           min: 1024
@@ -40,11 +33,11 @@ send_payload:
           mode: box
     timeout:
       name: Timeout (seconds)
-      description: 'How long to wait for the payload to send before giving up. Defaults to 10.'
+      description: Maximum seconds to wait for the transfer to complete. Default is 30.
       required: false
+      example: 30
       selector:
         number:
-          min: 5
-          max: 120
-          unit_of_measurement: s
+          min: 1
+          max: 300
           mode: box
