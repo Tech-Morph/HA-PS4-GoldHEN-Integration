@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
 
+from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from datetime import timedelta
 
 from .const import (
     DOMAIN,
@@ -20,7 +21,6 @@ from .const import (
     CONF_BINLOADER_PORT,
     CONF_FTP_PORT,
     DEFAULT_BINLOADER_PORT,
-    DEFAULT_FTP_PORT,
     PAYLOAD_DIR,
     TCP_PROBE_TIMEOUT,
 )
@@ -54,40 +54,19 @@ async def _send_bin_tcp(
     filepath: str,
     timeout: float = 30.0,
 ) -> None:
-    """
-    Stream a local .bin file to host:port over a raw TCP connection.
-    This is how BinLoader works: open a connection and write the binary
-    payload bytes directly. GoldHEN closes the connection once it has
-    received and loaded the payload.
-    """
+    """Stream a local .bin file to host:port over a raw TCP connection."""
     if not os.path.isfile(filepath):
-        raise HomeAssistantError(
-            f"Payload file not found: {filepath}. "
-            f"Place .bin files in {PAYLOAD_DIR}/ on the HA host."
-        )
+        raise HomeAssistantError(f"Payload file not found: {filepath}")
 
     file_size = os.path.getsize(filepath)
-    _LOGGER.info(
-        "Sending payload %s (%d bytes) to %s:%d",
-        os.path.basename(filepath),
-        file_size,
-        host,
-        port,
-    )
+    _LOGGER.info("Sending payload %s (%d bytes) to %s:%d", os.path.basename(filepath), file_size, host, port)
 
     try:
         _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
         )
-    except asyncio.TimeoutError as err:
-        raise HomeAssistantError(
-            f"Timed out connecting to BinLoader at {host}:{port}. "
-            "Is GoldHEN running and BinLoader enabled?"
-        ) from err
-    except OSError as err:
-        raise HomeAssistantError(
-            f"Cannot reach BinLoader at {host}:{port}: {err}"
-        ) from err
+    except (asyncio.TimeoutError, OSError) as err:
+        raise HomeAssistantError(f"Cannot reach BinLoader at {host}:{port}: {err}") from err
 
     try:
         loop = asyncio.get_running_loop()
@@ -100,29 +79,19 @@ async def _send_bin_tcp(
             await writer.wait_closed()
         except Exception:  # noqa: BLE001
             pass
-
-    _LOGGER.info(
-        "Payload %s sent successfully to %s:%d",
-        os.path.basename(filepath),
-        host,
-        port,
-    )
+    _LOGGER.info("Payload sent successfully.")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PS4 GoldHEN integration from a config entry."""
     host = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
-    ftp_port = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
+    ftp_port = entry.data.get(CONF_FTP_PORT, 2121)
 
-    # ── FTP reachability coordinator ───────────────────────────────────────────────
-    # Only FTP (2121) is polled periodically; BinLoader (9090) is NOT probed
-    # on a schedule because doing so can destabilise GoldHEN.
     async def _poll_ftp() -> dict[str, Any]:
         try:
             _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, ftp_port),
-                timeout=TCP_PROBE_TIMEOUT,
+                asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT,
             )
             writer.close()
             try:
@@ -150,27 +119,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ftp_port": ftp_port,
     }
 
-    # ── send_payload service ────────────────────────────────────────────────
+    # ── Service ───────────────────────────────────────────────────────────────────
+
     async def handle_send_payload(call: ServiceCall) -> None:
-        payload_file = call.data["payload_file"]
-        target_host = call.data.get("ps4_host") or host
-        target_port = int(call.data.get("binloader_port") or binloader_port)
+        p_file = call.data["payload_file"]
+        t_host = call.data.get("ps4_host") or host
+        t_port = int(call.data.get("binloader_port") or binloader_port)
         timeout = float(call.data.get("timeout", 30))
 
-        if os.path.isabs(payload_file):
-            filepath = payload_file
-        else:
-            filepath = os.path.join(PAYLOAD_DIR, payload_file)
-
-        await _send_bin_tcp(target_host, target_port, filepath, timeout)
+        filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
+        await _send_bin_tcp(t_host, t_port, filepath, timeout)
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(
-            DOMAIN,
-            _SVC_SEND_PAYLOAD,
-            handle_send_payload,
-            schema=_SEND_PAYLOAD_SCHEMA,
-        )
+        hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
+
+    # ── WebSocket & Panel ──────────────────────────────────────────────────────────
+
+    from .websocket import async_setup as async_setup_websocket
+    async_setup_websocket(hass)
+
+    hass.components.frontend.async_register_built_in_panel(
+        component_name="custom",
+        sidebar_title="PS4 FTP",
+        sidebar_icon="mdi:folder-network",
+        url_path="ps4_ftp",
+        config={
+            "entry_id": entry.entry_id,
+            "module_url": f"/api/ps4_goldhen/frontend/ps4-goldhen-panel.js",
+            "name": "ps4-goldhen-panel"
+        },
+        require_admin=False,
+    )
+    
+    # We also need to serve the JS file
+    hass.http.register_static_path(
+        "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js",
+        hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
