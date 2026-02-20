@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -16,6 +15,9 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     CONF_ADDON_URL,
+    CONF_PS4_HOST,
+    CONF_BINLOADER_PORT,
+    DEFAULT_BINLOADER_PORT,
     ENDPOINT_STATUS,
     ENDPOINT_WAKE,
     ENDPOINT_STANDBY,
@@ -36,6 +38,8 @@ SERVICE_SEND_PAYLOAD = "send_payload"
 SERVICE_SCHEMA_SEND_PAYLOAD = vol.Schema(
     {
         vol.Required("payload_file"): str,
+        vol.Optional("ps4_host"): str,
+        vol.Optional("binloader_port"): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
         vol.Optional("timeout"): vol.Coerce(float),
     }
 )
@@ -72,6 +76,8 @@ async def _addon_post(
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PS4 GoldHEN from a config entry."""
     addon_url = entry.data[CONF_ADDON_URL].rstrip("/")
+    ps4_host = entry.data[CONF_PS4_HOST]
+    binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
 
     async def _async_update() -> dict[str, Any]:
         try:
@@ -95,10 +101,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
         "addon_url": addon_url,
+        "ps4_host": ps4_host,
+        "binloader_port": binloader_port,
     }
 
     # ---- Service handlers ----
-
     async def handle_wake(call: ServiceCall) -> None:
         _LOGGER.info("PS4 wake requested")
         result = await _addon_post(addon_url, ENDPOINT_WAKE)
@@ -116,12 +123,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_send_payload(call: ServiceCall) -> None:
         payload_file = call.data["payload_file"]
+        # Allow per-call override of ps4_host and binloader_port
+        target_host = call.data.get("ps4_host") or ps4_host
+        target_port = int(call.data.get("binloader_port") or binloader_port)
         timeout = float(call.data.get("timeout") or DEFAULT_TIMEOUT)
-        _LOGGER.info("Sending payload '%s' via add-on", payload_file)
+        _LOGGER.info(
+            "Sending payload '%s' to %s:%s via add-on",
+            payload_file,
+            target_host,
+            target_port,
+        )
         result = await _addon_post(
             addon_url,
             ENDPOINT_PAYLOAD,
-            {"payload_file": payload_file},
+            {
+                "payload_file": payload_file,
+                "ps4_host": target_host,
+                "binloader_port": target_port,
+            },
             timeout,
         )
         _LOGGER.info("Payload result: %s", result)
@@ -137,7 +156,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update — reload the entry so new settings take effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
