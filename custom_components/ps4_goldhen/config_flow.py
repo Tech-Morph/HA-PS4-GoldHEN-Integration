@@ -14,11 +14,9 @@ from .const import (
     CONF_PS4_HOST,
     CONF_BINLOADER_PORT,
     CONF_FTP_PORT,
-    CONF_GOLDHEN_PORT,
     DEFAULT_PS4_HOST,
     DEFAULT_BINLOADER_PORT,
     DEFAULT_FTP_PORT,
-    DEFAULT_GOLDHEN_PORT,
     TCP_PROBE_TIMEOUT,
 )
 
@@ -29,7 +27,6 @@ def _schema(
     ps4_host: str = DEFAULT_PS4_HOST,
     binloader_port: int = DEFAULT_BINLOADER_PORT,
     ftp_port: int = DEFAULT_FTP_PORT,
-    goldhen_port: int = DEFAULT_GOLDHEN_PORT,
 ) -> vol.Schema:
     """Return the config/options schema with current defaults pre-filled."""
     return vol.Schema(
@@ -40,9 +37,6 @@ def _schema(
             ): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
             vol.Required(
                 CONF_FTP_PORT, default=ftp_port
-            ): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
-            vol.Required(
-                CONF_GOLDHEN_PORT, default=goldhen_port
             ): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
         }
     )
@@ -85,7 +79,6 @@ class PS4GoldHENConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             host = user_input[CONF_PS4_HOST].strip()
             ftp_port = int(user_input[CONF_FTP_PORT])
             binloader_port = int(user_input[CONF_BINLOADER_PORT])
-            goldhen_port = int(user_input[CONF_GOLDHEN_PORT])
 
             # Validate: probe FTP (safe to poke). BinLoader is NOT probed on
             # setup because repeated connections can destabilise GoldHEN.
@@ -93,7 +86,6 @@ class PS4GoldHENConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "ftp_not_reachable"
 
             if not errors:
-                # Prevent duplicate entries for the same PS4
                 await self.async_set_unique_id(host)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -102,7 +94,6 @@ class PS4GoldHENConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PS4_HOST: host,
                         CONF_BINLOADER_PORT: binloader_port,
                         CONF_FTP_PORT: ftp_port,
-                        CONF_GOLDHEN_PORT: goldhen_port,
                     },
                 )
 
@@ -128,7 +119,6 @@ class PS4GoldHENOptionsFlow(config_entries.OptionsFlow):
             host = user_input[CONF_PS4_HOST].strip()
             ftp_port = int(user_input[CONF_FTP_PORT])
             binloader_port = int(user_input[CONF_BINLOADER_PORT])
-            goldhen_port = int(user_input[CONF_GOLDHEN_PORT])
 
             if not await _tcp_reachable(host, ftp_port):
                 errors["base"] = "ftp_not_reachable"
@@ -141,7 +131,6 @@ class PS4GoldHENOptionsFlow(config_entries.OptionsFlow):
                         CONF_PS4_HOST: host,
                         CONF_BINLOADER_PORT: binloader_port,
                         CONF_FTP_PORT: ftp_port,
-                        CONF_GOLDHEN_PORT: goldhen_port,
                     },
                 )
                 return self.async_create_entry(title="", data={})
@@ -152,7 +141,6 @@ class PS4GoldHENOptionsFlow(config_entries.OptionsFlow):
                 ps4_host=current.get(CONF_PS4_HOST, DEFAULT_PS4_HOST),
                 binloader_port=current.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
                 ftp_port=current.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
-                goldhen_port=current.get(CONF_GOLDHEN_PORT, DEFAULT_GOLDHEN_PORT),
             ),
             errors=errors,
         )
