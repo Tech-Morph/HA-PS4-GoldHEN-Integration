@@ -1,14 +1,14 @@
 send_payload:
   name: Send Payload
   description: >-
-    Stream a .bin payload file to the PS4 GoldHEN BinLoader over TCP.
+    Stream a .bin or .elf payload file to the PS4 GoldHEN BinLoader over TCP.
     The file must exist on the Home Assistant host at the path specified
     (absolute) or inside /config/ps4_payloads/ (bare filename).
   fields:
     payload_file:
       name: Payload File
       description: >-
-        Filename (e.g. goldhen.bin) relative to /config/ps4_payloads/,
+        Filename (e.g. goldhen.bin or payload.elf) relative to /config/ps4_payloads/,
         or an absolute path on the HA host.
       required: true
       example: goldhen.bin
