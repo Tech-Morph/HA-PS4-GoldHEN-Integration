@@ -156,7 +156,7 @@ class PS4GoldHENPanel extends HTMLElement {
       <div class="header">
         <div class="path">PS4 FTP: ${this._path}</div>
         <button id="btn-root">Root</button>
-        <button id="btn-up">Up</button>
+        <button id="btn-back">Back</button>
         <button id="btn-refresh">Refresh</button>
       </div>
 
