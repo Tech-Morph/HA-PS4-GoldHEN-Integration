@@ -15,14 +15,29 @@ reboot:
 
 send_payload:
   name: Send Payload
-  description: 'Send a .bin payload to the PS4 GoldHEN BinLoader via the add-on.'
+  description: 'Send a .bin payload to the PS4 GoldHEN BinLoader via the add-on. The PS4 IP and BinLoader port default to the values set during integration setup, but can be overridden per call.'
   fields:
     payload_file:
-      name: Payload file
-      description: 'Filename of the payload (e.g. "mira.bin"). Must be placed in /config/ps4_payloads/ on the HA host.'
+      name: Payload File
+      description: 'Filename of the .bin payload (e.g. "mira.bin"). Must be placed in /config/ps4_payloads/ on the HA host.'
       required: true
       selector:
         text:
+    ps4_host:
+      name: PS4 IP Address (override)
+      description: 'Override the PS4 IP address for this payload send. Leave blank to use the value from integration setup.'
+      required: false
+      selector:
+        text:
+    binloader_port:
+      name: BinLoader Port (override)
+      description: 'Override the BinLoader port for this payload send. Leave blank to use the value from integration setup (default: 9090).'
+      required: false
+      selector:
+        number:
+          min: 1024
+          max: 65535
+          mode: box
     timeout:
       name: Timeout (seconds)
       description: 'How long to wait for the payload to send before giving up. Defaults to 10.'
@@ -32,3 +47,4 @@ send_payload:
           min: 5
           max: 120
           unit_of_measurement: s
+          mode: box
