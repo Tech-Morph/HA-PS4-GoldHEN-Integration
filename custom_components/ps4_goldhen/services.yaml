@@ -19,7 +19,7 @@ send_payload:
   fields:
     payload_file:
       name: Payload file
-      description: 'Filename of the payload (e.g. "mira.bin"). Must be placed in /addon_configs/ps4_goldhen/payloads/ on the HA host.'
+      description: 'Filename of the payload (e.g. "mira.bin"). Must be placed in /config/ps4_payloads/ on the HA host.'
       required: true
       selector:
         text:
