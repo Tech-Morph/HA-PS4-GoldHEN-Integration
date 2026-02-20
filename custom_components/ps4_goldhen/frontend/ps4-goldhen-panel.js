@@ -238,7 +238,7 @@ class PS4GoldHENPanel extends HTMLElement {
 
     // Header buttons
     const btnRoot = this.shadowRoot.querySelector("#btn-root");
-    const btnUp = this.shadowRoot.querySelector("#btn-up");
+    const btnUp = this.shadowRoot.querySelector("#btn-back");
     const btnRefresh = this.shadowRoot.querySelector("#btn-refresh");
 
     if (btnRoot) btnRoot.onclick = () => this._loadDir("/");
