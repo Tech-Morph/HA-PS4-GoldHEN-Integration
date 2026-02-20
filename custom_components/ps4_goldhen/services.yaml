@@ -41,3 +41,35 @@ send_payload:
           min: 1
           max: 300
           mode: box
+
+install_pkg:
+  name: Install Package
+  description: >-
+    Send a direct install request to the PS4 Remote Package Installer (RPI/Flatz).
+    The PS4 must have the Remote Package Installer payload loaded and running.
+  fields:
+    url:
+      name: Package URL
+      description: >-
+        Direct HTTP(S) URL to the .pkg file to install on the PS4.
+      required: true
+      example: http://192.168.1.10:8080/games/mygame.pkg
+      selector:
+        text:
+    ps4_host:
+      name: PS4 Host (optional)
+      description: Override the PS4 IP for this call. Defaults to the configured host.
+      required: false
+      example: 192.168.1.100
+      selector:
+        text:
+    rpi_port:
+      name: RPI Port (optional)
+      description: Override the Remote Package Installer port. Defaults to the configured port (12800).
+      required: false
+      example: 12800
+      selector:
+        number:
+          min: 1024
+          max: 65535
+          mode: box
