@@ -2,23 +2,23 @@ from __future__ import annotations
 
 DOMAIN = "ps4_goldhen"
 
-# Config entry keys
-CONF_ADDON_URL = "addon_url"        # e.g. http://192.168.x.x:8787
-CONF_PS4_HOST = "ps4_host"          # e.g. 192.168.x.x
-CONF_BINLOADER_PORT = "binloader_port"  # default 9090
+# ── Config entry keys ──────────────────────────────────────────────────────────
+CONF_PS4_HOST        = "ps4_host"        # PS4 IP address
+CONF_BINLOADER_PORT  = "binloader_port"  # BinLoader TCP port (default 9090)
+CONF_FTP_PORT        = "ftp_port"        # GoldHEN FTP port   (default 2121)
 
-# Defaults  (no real addresses stored in code)
-DEFAULT_ADDON_URL = "http://192.168.x.x:8787"
-DEFAULT_PS4_HOST = "192.168.x.x"
+# ── Defaults ──────────────────────────────────────────────────────────────────
+# These are placeholder values; the user must enter real values during setup.
+DEFAULT_PS4_HOST       = "192.168.x.x"
 DEFAULT_BINLOADER_PORT = 9090
+DEFAULT_FTP_PORT       = 2121
 
-# Add-on API endpoints
-ENDPOINT_STATUS = "/status"
-ENDPOINT_WAKE = "/wake"
-ENDPOINT_STANDBY = "/rest"
-ENDPOINT_REBOOT = "/reboot"
-ENDPOINT_PAYLOAD = "/payload"
-ENDPOINT_HEALTH = "/health"
+# ── Payload directory on the HA host ──────────────────────────────────────────
+PAYLOAD_DIR = "/config/ps4_payloads"
 
-# Platforms
-PLATFORMS: list[str] = ["sensor", "button"]
+# ── TCP probe timeout (seconds) ───────────────────────────────────────────────
+TCP_PROBE_TIMEOUT = 3.0
+
+# ── Platforms ─────────────────────────────────────────────────────────────────
+# Only sensor for Phase 1.  Button platform removed (Phase 2).
+PLATFORMS: list[str] = ["sensor"]
