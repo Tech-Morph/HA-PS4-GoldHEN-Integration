@@ -19,8 +19,10 @@ from .const import (
     CONF_PS4_HOST,
     CONF_BINLOADER_PORT,
     CONF_FTP_PORT,
+    CONF_GOLDHEN_PORT,
     DEFAULT_BINLOADER_PORT,
     DEFAULT_FTP_PORT,
+    DEFAULT_GOLDHEN_PORT,
     PAYLOAD_DIR,
     TCP_PROBE_TIMEOUT,
 )
@@ -56,9 +58,8 @@ async def _send_bin_tcp(
 ) -> None:
     """
     Stream a local .bin file to host:port over a raw TCP connection.
-
     This is how BinLoader works: open a connection and write the binary
-    payload bytes directly.  GoldHEN closes the connection once it has
+    payload bytes directly. GoldHEN closes the connection once it has
     received and loaded the payload.
     """
     if not os.path.isfile(filepath):
@@ -116,8 +117,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
     ftp_port = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
+    goldhen_port = entry.data.get(CONF_GOLDHEN_PORT, DEFAULT_GOLDHEN_PORT)
 
-    # ── FTP reachability coordinator ───────────────────────────────────────────────
+    # ── FTP reachability coordinator ──────────────────────────────────────────────────
     # Only FTP (2121) is polled periodically; BinLoader (9090) is NOT probed
     # on a schedule because doing so can destabilise GoldHEN (per 0.1.1 notes).
     async def _poll_ftp() -> dict[str, Any]:
@@ -150,9 +152,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "host": host,
         "binloader_port": binloader_port,
         "ftp_port": ftp_port,
+        "goldhen_port": goldhen_port,
     }
 
-    # ── send_payload service ────────────────────────────────────────────────────
+    # ── send_payload service ──────────────────────────────────────────────────
     async def handle_send_payload(call: ServiceCall) -> None:
         payload_file = call.data["payload_file"]
         target_host = call.data.get("ps4_host") or host
