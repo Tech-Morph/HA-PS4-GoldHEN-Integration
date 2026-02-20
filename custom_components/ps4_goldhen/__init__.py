@@ -1,13 +1,11 @@
 """The PS4 GoldHEN Integration."""
 from __future__ import annotations
-
 import asyncio
 import io
 import logging
 import os
 from datetime import timedelta
 from typing import Any
-
 from aiohttp import web
 import voluptuous as vol
 
@@ -80,9 +78,8 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:  # noqa: BLE001
+        except Exception: # noqa: BLE001
             pass
-
     _LOGGER.info("Payload sent successfully.")
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -142,8 +139,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .websocket import async_setup as async_setup_websocket
     async_setup_websocket(hass)
 
-    # Register the FTP Download View
+    # Register the FTP Views
     hass.http.register_view(PS4FTPDownloadView())
+    hass.http.register_view(PS4FTPUploadView())
 
     # Serve the JS file asynchronously
     js_path = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
@@ -189,11 +187,11 @@ class PS4FTPDownloadView(HomeAssistantView):
         
         if not entry_id or not path:
             return web.Response(text="Missing entry_id or path", status=400)
-            
+        
         data = hass.data[DOMAIN].get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-            
+        
         host = data["host"]
         port = int(data.get("ftp_port", 2121))
         
@@ -216,6 +214,62 @@ class PS4FTPDownloadView(HomeAssistantView):
             )
         except Exception as err:
             return web.Response(text=f"FTP Error: {err}", status=500)
+
+class PS4FTPUploadView(HomeAssistantView):
+    """View to upload files to PS4 via FTP."""
+    url = "/api/ps4_goldhen/ftp/upload"
+    name = "api:ps4_goldhen:ftp_upload"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle upload request."""
+        import ftplib
+        hass = request.app["hass"]
+        
+        # multipart reader
+        reader = await request.multipart()
+        
+        entry_id = None
+        path = None
+        file_field = None
+        
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "entry_id":
+                entry_id = (await part.read(decode=True)).decode()
+            elif part.name == "path":
+                path = (await part.read(decode=True)).decode()
+            elif part.name == "file":
+                file_field = part
+                break
+        
+        if not all([entry_id, path, file_field]):
+            return web.Response(text="Missing entry_id, path, or file", status=400)
+            
+        data = hass.data[DOMAIN].get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+            
+        host = data["host"]
+        port = int(data.get("ftp_port", 2121))
+        
+        filename = file_field.filename
+        full_dest_path = (path.rstrip("/") + "/" + filename).replace("//", "/")
+
+        def _upload_file(file_data):
+            with ftplib.FTP() as ftp:
+                ftp.connect(host, port, timeout=15)
+                ftp.login()
+                ftp.storbinary(f"STOR {full_dest_path}", io.BytesIO(file_data))
+        
+        try:
+            content = await file_field.read(decode=True)
+            await hass.async_add_executor_job(_upload_file, content)
+            return web.json_response({"success": True, "path": full_dest_path})
+        except Exception as err:
+            return web.Response(text=f"FTP Upload Error: {err}", status=500)
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload the entry when the user saves new options."""
