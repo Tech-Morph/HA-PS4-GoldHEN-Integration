@@ -7,14 +7,12 @@
         "data": {
           "ps4_host": "PS4 IP Address",
           "binloader_port": "BinLoader Port",
-          "ftp_port": "FTP Port",
-          "goldhen_port": "GoldHEN HTTP API Port"
+          "ftp_port": "FTP Port"
         },
         "data_description": {
           "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
           "binloader_port": "BinLoader TCP port (default: 9090)",
-          "ftp_port": "GoldHEN FTP port (default: 2121)",
-          "goldhen_port": "GoldHEN HTTP API port for power commands (default: 12800)"
+          "ftp_port": "GoldHEN FTP port used to verify connectivity (default: 2121)"
         }
       }
     },
@@ -30,14 +28,12 @@
         "data": {
           "ps4_host": "PS4 IP Address",
           "binloader_port": "BinLoader Port",
-          "ftp_port": "FTP Port",
-          "goldhen_port": "GoldHEN HTTP API Port"
+          "ftp_port": "FTP Port"
         },
         "data_description": {
           "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
           "binloader_port": "BinLoader TCP port (default: 9090)",
-          "ftp_port": "GoldHEN FTP port (default: 2121)",
-          "goldhen_port": "GoldHEN HTTP API port for power commands (default: 12800)"
+          "ftp_port": "GoldHEN FTP port used to verify connectivity (default: 2121)"
         }
       }
     },
