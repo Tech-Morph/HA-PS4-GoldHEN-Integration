@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_ADDON_URL
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -67,7 +67,7 @@ class Ps4GoldhenSensor(CoordinatorEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
         return {
-            "addon_url": self.coordinator.config_entry.data.get("addon_url"),
+            "addon_url": self.coordinator.config_entry.data.get(CONF_ADDON_URL),
             "ps4_ip": data.get("ip"),
             "ps4_mac": data.get("mac"),
             "firmware": data.get("firmware"),
