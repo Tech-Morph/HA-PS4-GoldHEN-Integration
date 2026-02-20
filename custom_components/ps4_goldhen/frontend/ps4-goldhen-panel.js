@@ -1,10 +1,7 @@
 /**
- * PS4 GoldHEN FTP File Browser Panel
+ * PS4 GoldHEN Integration Control Panel
  * A lightweight web component for Home Assistant.
  */
-
-const html = (strings, ...values) => strings.reduce((acc, str, i) => acc + str + (values[i] || ""), "");
-
 class PS4GoldHENPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
@@ -23,12 +20,14 @@ class PS4GoldHENPanel extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._entries = [];
     this._loading = false;
-    this._editing = null; // { path: string, name: string, content: string }
+    this._uploading = false;
+    this._statusMsg = "";
   }
 
   async _loadDir(path = this._path) {
     if (!this._hass) return;
     this._loading = true;
+    this._path = path;
     this._render();
     try {
       const result = await this._hass.callWS({
@@ -36,295 +35,222 @@ class PS4GoldHENPanel extends HTMLElement {
         entry_id: this._panel.config.entry_id,
         path: path,
       });
-      this._path = result.path;
-      this._entries = result.entries;
-    } catch (e) {
-      alert(`FTP Error: ${e.message || e}`);
+      this._entries = result.entries || [];
+    } catch (err) {
+      console.error("FTP List Dir Error:", err);
     } finally {
       this._loading = false;
       this._render();
     }
   }
 
-  async _deleteEntry(entry) {
-    if (!confirm(`Delete ${entry.name}?`)) return;
-    try {
-      await this._hass.callWS({
-        type: "ps4_goldhen/ftp_delete",
-        entry_id: this._panel.config.entry_id,
-        path: entry.path,
-        is_dir: entry.is_dir,
-      });
-      this._loadDir();
-    } catch (e) {
-      alert(`Delete failed: ${e.message || e}`);
-    }
-  }
-
-  async _renameEntry(entry) {
-    const newName = prompt(`Rename ${entry.name} to:`, entry.name);
-    if (!newName || newName === entry.name) return;
-    
-    const parts = this._path.split("/").filter(p => p);
-    const parentPath = "/" + parts.join("/");
-    const toPath = (parentPath === "/" ? "" : parentPath) + "/" + newName;
-
-    try {
-      await this._hass.callWS({
-        type: "ps4_goldhen/ftp_rename",
-        entry_id: this._panel.config.entry_id,
-        from_path: entry.path,
-        to_path: toPath,
-      });
-      this._loadDir();
-    } catch (e) {
-      alert(`Rename failed: ${e.message || e}`);
-    }
-  }
-
-  async _editEntry(entry) {
-    this._loading = true;
-    this._render();
-    try {
-      const result = await this._hass.callWS({
-        type: "ps4_goldhen/ftp_get_text",
-        entry_id: this._panel.config.entry_id,
-        path: entry.path,
-      });
-      this._editing = { path: entry.path, name: entry.name, content: result.content };
-    } catch (e) {
-      alert(`Read failed: ${e.message || e}`);
-    } finally {
-      this._loading = false;
-      this._render();
-    }
-  }
-
-  async _saveFile() {
-    const textarea = this.shadowRoot.querySelector("#editor-textarea");
-    const content = textarea ? textarea.value : "";
-    this._loading = true;
-    this._render();
-    try {
-      await this._hass.callWS({
-        type: "ps4_goldhen/ftp_put_text",
-        entry_id: this._panel.config.entry_id,
-        path: this._editing.path,
-        content: content,
-      });
-      this._editing = null;
-      this._loadDir();
-    } catch (e) {
-      alert(`Save failed: ${e.message || e}`);
-      this._loading = false;
-      this._render();
-    }
-  }
-
-  async _downloadEntry(entry) {
-    this._loading = true;
-    this._render();
-    try {
-      const response = await fetch(`/api/ps4_goldhen/ftp/download?entry_id=${this._panel.config.entry_id}&path=${encodeURIComponent(entry.path)}`, {
-        headers: {
-          "Authorization": `Bearer ${this._hass.auth.accessToken}`
-        }
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = entry.name;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      a.remove();
-    } catch (e) {
-      alert(`Download failed: ${e.message}`);
-    } finally {
-      this._loading = false;
-      this._render();
-    }
-  }
-
-  async _uploadFile() {
-    const fileInput = this.shadowRoot.querySelector("#upload-input");
-    if (!fileInput || !fileInput.files.length) return;
-    
+  async _handleUploadPkg() {
+    const fileInput = this.shadowRoot.getElementById("pkg-upload");
     const file = fileInput.files[0];
-    this._loading = true;
+    if (!file) {
+      alert("Please select a .pkg file first.");
+      return;
+    }
+
+    this._uploading = true;
+    this._statusMsg = `Uploading ${file.name}...`;
     this._render();
 
     const formData = new FormData();
-    formData.append("entry_id", this._panel.config.entry_id);
-    formData.append("path", this._path);
     formData.append("file", file);
+    formData.append("entry_id", this._panel.config.entry_id);
 
     try {
-      const response = await fetch("/api/ps4_goldhen/ftp/upload", {
+      const resp = await fetch("/api/ps4_goldhen/pkg/upload", {
         method: "POST",
         body: formData,
         headers: {
-          "Authorization": `Bearer ${this._hass.auth.accessToken}`
-        }
+          "Authorization": "Bearer " + this._hass.auth.data.access_token,
+        },
       });
-      if (!response.ok) throw new Error(await response.text());
-      this._loadDir();
-    } catch (e) {
-      alert(`Upload failed: ${e.message}`);
+
+      if (resp.ok) {
+        this._statusMsg = "Upload successful! Installation triggered.";
+      } else {
+        const errText = await resp.text();
+        this._statusMsg = `Upload failed: ${errText}`;
+      }
+    } catch (err) {
+      this._statusMsg = `Error: ${err.message}`;
     } finally {
-      this._loading = false;
+      this._uploading = false;
+      fileInput.value = "";
       this._render();
     }
   }
 
   _render() {
-    this.shadowRoot.innerHTML = html`
+    this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; padding: 16px; font-family: sans-serif; background: var(--primary-background-color); color: var(--primary-text-color); height: 100vh; overflow-y: auto; }
-        .header { display: flex; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color); padding-bottom: 8px; gap: 8px; flex-wrap: wrap; }
-        .path { flex: 1; font-weight: bold; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 200px; }
-        .nav-btns { display: flex; gap: 4px; }
-        .upload-section { display: flex; align-items: center; gap: 8px; background: var(--secondary-background-color); padding: 4px 8px; border-radius: 4px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-        th { text-align: left; padding: 8px; border-bottom: 2px solid var(--divider-color); }
-        td { padding: 8px; border-bottom: 1px solid var(--divider-color); vertical-align: middle; }
-        tr:hover { background: var(--secondary-background-color); }
-        .folder { color: var(--primary-color); cursor: pointer; text-decoration: underline; }
-        .file { color: var(--primary-text-color); }
-        .actions { display: flex; gap: 4px; }
-        .actions button, .nav-btns button { cursor: pointer; padding: 4px 8px; background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 4px; color: var(--primary-text-color); }
-        .actions button:hover, .nav-btns button:hover { background: var(--secondary-background-color); }
-        .loading { font-style: italic; color: var(--secondary-text-color); margin-bottom: 8px; }
-        
-        /* Editor Overlay */
-        .editor-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-        .editor-container { background: var(--primary-background-color); width: 90%; height: 90%; display: flex; flex-direction: column; padding: 16px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
-        .editor-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        #editor-textarea { flex: 1; font-family: 'Consolas', 'Monaco', monospace; font-size: 14px; padding: 12px; border: 1px solid var(--divider-color); background: var(--secondary-background-color); color: var(--primary-text-color); resize: none; outline: none; }
-        .editor-actions { margin-top: 16px; display: flex; justify-content: flex-end; gap: 12px; }
-        .editor-actions button { padding: 8px 20px; cursor: pointer; border-radius: 4px; border: 1px solid var(--divider-color); background: var(--card-background-color); color: var(--primary-text-color); }
-        .btn-save { background: var(--primary-color) !important; color: white !important; border: none !important; }
+        :host {
+          display: block;
+          padding: 16px;
+          color: var(--primary-text-color);
+          background-color: var(--primary-background-color);
+          min-height: 100%;
+        }
+        ha-card {
+          padding: 16px;
+          margin-bottom: 24px;
+          display: block;
+          background: var(--ha-card-background, var(--card-background-color, white));
+          box-shadow: var(--ha-card-box-shadow, 0 2px 2px 0 rgba(0,0,0,0.14), 0 1px 5px 0 rgba(0,0,0,0.12), 0 3px 1px -2px rgba(0,0,0,0.2));
+          border-radius: var(--ha-card-border-radius, 4px);
+        }
+        h1 { margin: 0 0 16px 0; font-size: 24px; }
+        h3 { margin: 0 0 12px 0; font-size: 18px; }
+        .upload-section {
+          border: 2px dashed var(--divider-color);
+          padding: 20px;
+          border-radius: 8px;
+          text-align: center;
+          background: var(--secondary-background-color);
+        }
+        .file-list {
+          width: 100%;
+          border-collapse: collapse;
+          margin-top: 16px;
+        }
+        .file-list th, .file-list td {
+          text-align: left;
+          padding: 12px 8px;
+          border-bottom: 1px solid var(--divider-color);
+        }
+        .breadcrumb {
+          margin-bottom: 16px;
+          font-size: 1.1em;
+          padding: 8px;
+          background: var(--secondary-background-color);
+          border-radius: 4px;
+        }
+        .breadcrumb span {
+          color: var(--primary-color);
+          cursor: pointer;
+          font-weight: bold;
+        }
+        .action-btn {
+          color: var(--primary-color);
+          cursor: pointer;
+          text-decoration: underline;
+          margin-right: 12px;
+          font-weight: 500;
+        }
+        .status {
+          margin-top: 12px;
+          font-weight: 500;
+          color: var(--primary-color);
+        }
+        button {
+          padding: 10px 20px;
+          background: var(--primary-color);
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 14px;
+          font-weight: bold;
+          margin-top: 10px;
+        }
+        button:disabled {
+          background: var(--disabled-text-color);
+          cursor: not-allowed;
+        }
+        input[type="file"] {
+          margin-bottom: 10px;
+          display: block;
+          width: 100%;
+          max-width: 300px;
+          margin-left: auto;
+          margin-right: auto;
+        }
       </style>
-
-      <div class="header">
-        <div class="path">PS4 FTP: ${this._path}</div>
-        <div class="nav-btns">
-          <button id="btn-root">Root</button>
-          <button id="btn-back">Back</button>
-          <button id="btn-refresh">Refresh</button>
-        </div>
+      
+      <ha-card>
+        <h1>PS4 GoldHEN Control Panel</h1>
+        
         <div class="upload-section">
-          <input type="file" id="upload-input" style="display:none">
-          <button id="btn-select">Select File</button>
-          <button id="btn-backload">Upload to Current Folder</button>
+          <h3>Install Local PKG from Device</h3>
+          <p>Directly upload a .pkg file from this device to Home Assistant. It will be served locally to your PS4 for installation.</p>
+          <input type="file" id="pkg-upload" accept=".pkg">
+          <button id="upload-btn" ${this._uploading ? 'disabled' : ''}>
+            ${this._uploading ? 'Uploading...' : 'Upload & Install'}
+          </button>
+          <div class="status">${this._statusMsg}</div>
         </div>
-      </div>
+      </ha-card>
 
-      ${this._loading ? '<div class="loading">Processing...</div>' : ""}
-
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Size</th>
-            <th>Modified</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${this._entries.map(e => `
-            <tr>
-              <td>
-                <span class="${e.is_dir ? 'folder' : 'file'}" data-path="${e.path}" data-isdir="${e.is_dir}">
-                  ${e.is_dir ? "📁" : "📄"} ${e.name}
-                </span>
-              </td>
-              <td>${e.is_dir ? "-" : (e.size / 1024 / 1024).toFixed(2) + " MB"}</td>
-              <td>${e.modified}</td>
-              <td class="actions">
-                ${!e.is_dir ? `<button data-action="download" data-path="${e.path}" data-name="${e.name}" title="Download">💾</button>` : ""}
-                ${!e.is_dir ? `<button data-action="edit" data-path="${e.path}" data-name="${e.name}" title="Edit">✏️</button>` : ""}
-                <button data-action="rename" data-path="${e.path}" data-name="${e.name}" title="Rename">🏷️</button>
-                <button data-action="delete" data-path="${e.path}" data-isdir="${e.is_dir}" data-name="${e.name}" title="Delete">🗑️</button>
-              </td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-
-      ${this._editing ? html`
-        <div class="editor-overlay">
-          <div class="editor-container">
-            <div class="editor-header">
-              <div>
-                <strong>Editing: ${this._editing.name}</strong><br>
-                <small style="color: var(--secondary-text-color)">${this._editing.path}</small>
-              </div>
-            </div>
-            <textarea id="editor-textarea" spellcheck="false">${this._editing.content}</textarea>
-            <div class="editor-actions">
-              <button id="btn-cancel">Cancel</button>
-              <button id="btn-save" class="btn-save">Save to PS4</button>
-            </div>
-          </div>
+      <ha-card>
+        <h3>PS4 FTP File Browser</h3>
+        <div class="breadcrumb" id="breadcrumbs">
+          <span data-path="/">/</span>
+          ${this._path.split('/').filter(p => p).map((p, i, arr) => `
+            / <span data-path="/${arr.slice(0, i + 1).join('/')}">${p}</span>
+          `).join('')}
         </div>
-      ` : ""}
+
+        ${this._loading ? '<p>Loading FTP directory...</p>' : `
+          <table class="file-list">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this._entries.length === 0 ? '<tr><td colspan="3">No files found or FTP connection failed.</td></tr>' : 
+                this._entries.map(entry => `
+                <tr>
+                  <td>${entry.type === 'dir' ? '📁' : '📄'} ${entry.name}</td>
+                  <td>${entry.size || '-'}</td>
+                  <td>
+                    ${entry.type === 'dir' ? 
+                      `<span class="action-btn" data-action="open" data-name="${entry.name}">Open</span>` : 
+                      (entry.name.endsWith('.pkg') ? `<span class="action-btn" data-action="install" data-name="${entry.name}">Install</span>` : '')
+                    }
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      </ha-card>
     `;
 
-    // Event delegation for table clicks
-    const table = this.shadowRoot.querySelector("table");
-    if (table) {
-      table.onclick = (ev) => {
-        const btn = ev.target.closest("button");
-        const span = ev.target.closest("span.folder");
-        
-        if (span) {
-          this._loadDir(span.dataset.path);
-          return;
+    // Event Listeners
+    this.shadowRoot.getElementById("upload-btn")?.addEventListener("click", () => this._handleUploadPkg());
+    
+    this.shadowRoot.getElementById("breadcrumbs")?.querySelectorAll("span").forEach(span => {
+      span.addEventListener("click", () => this._loadDir(span.dataset.path));
+    });
+
+    this.shadowRoot.querySelectorAll('.action-btn[data-action="open"]').forEach(btn => {
+      btn.addEventListener("click", () => {
+        const newPath = (this._path === '/' ? '' : this._path) + '/' + btn.dataset.name;
+        this._loadDir(newPath);
+      });
+    });
+
+    this.shadowRoot.querySelectorAll('.action-btn[data-action="install"]').forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const fullPath = (this._path === '/' ? '' : this._path) + '/' + btn.dataset.name;
+        if (!confirm(`Install ${btn.dataset.name} via RPI?`)) return;
+        try {
+          // Trigger the ps4_goldhen.install_pkg service
+          await this._hass.callService("ps4_goldhen", "install_pkg", {
+            url: `ftp://ps4:ps4@${this._hass.states[this._panel.config.entry_id]?.attributes?.host || 'PS4_IP'}:2121${fullPath}`
+          });
+          alert("Installation request sent to RPI.");
+        } catch (err) {
+          alert("Error: " + err.message);
         }
-        
-        if (!btn) return;
-        const action = btn.dataset.action;
-        const path = btn.dataset.path;
-        const name = btn.dataset.name;
-        const isDir = btn.dataset.isdir === "true";
-
-        if (action === "delete") this._deleteEntry({ name, path, is_dir: isDir });
-        else if (action === "rename") this._renameEntry({ name, path });
-        else if (action === "edit") this._editEntry({ name, path });
-        else if (action === "download") this._downloadEntry({ name, path });
-      };
-    }
-
-    // Buttons
-    this.shadowRoot.querySelector("#btn-root").onclick = () => this._loadDir("/");
-    this.shadowRoot.querySelector("#btn-back").onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
-    this.shadowRoot.querySelector("#btn-refresh").onclick = () => this._loadDir();
-    
-    const btnSelect = this.shadowRoot.querySelector("#btn-select");
-    const uploadInput = this.shadowRoot.querySelector("#upload-input");
-    const btnUpload = this.shadowRoot.querySelector("#btn-backload");
-    
-    if (btnSelect) btnSelect.onclick = () => uploadInput.click();
-    if (btnUpload) btnUpload.onclick = () => this._uploadFile();
-
-    // File input label change
-    if (uploadInput) {
-        uploadInput.onchange = () => {
-            if (uploadInput.files.length) {
-                btnUpload.textContent = `Upload: ${uploadInput.files[0].name}`;
-            }
-        };
-    }
-
-    // Editor buttons
-    if (this._editing) {
-      this.shadowRoot.querySelector("#btn-cancel").onclick = () => { this._editing = null; this._render(); };
-      this.shadowRoot.querySelector("#btn-save").onclick = () => this._saveFile();
-    }
+      });
+    });
   }
 }
-
 customElements.define("ps4-goldhen-panel", PS4GoldHENPanel);
