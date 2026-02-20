@@ -3,23 +3,21 @@
     "step": {
       "user": {
         "title": "Connect to PS4 GoldHEN",
-        "description": "Enter the connection details for your PS4. GoldHEN must be running with the BinLoader and FTP services active.",
+        "description": "Enter the connection details for your PS4. GoldHEN must be running with BinLoader and FTP services active.",
         "data": {
           "ps4_host": "PS4 IP Address",
           "binloader_port": "BinLoader Port",
-          "ftp_port": "FTP Port",
-          "goldhen_port": "GoldHEN HTTP API Port"
+          "ftp_port": "FTP Port"
         },
         "data_description": {
           "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
-          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)",
-          "ftp_port": "Port GoldHEN FTP server listens on (default: 2121)",
-          "goldhen_port": "Port GoldHEN HTTP API listens on for power commands (default: 12800)"
+          "binloader_port": "BinLoader TCP port (default: 9090)",
+          "ftp_port": "GoldHEN FTP port used to verify connectivity (default: 2121)"
         }
       }
     },
     "error": {
-      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP address and make sure GoldHEN is running with FTP enabled."
+      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP and ensure GoldHEN is running."
     }
   },
   "options": {
@@ -30,19 +28,17 @@
         "data": {
           "ps4_host": "PS4 IP Address",
           "binloader_port": "BinLoader Port",
-          "ftp_port": "FTP Port",
-          "goldhen_port": "GoldHEN HTTP API Port"
+          "ftp_port": "FTP Port"
         },
         "data_description": {
           "ps4_host": "IP address of your PS4 (e.g. 192.168.1.100)",
-          "binloader_port": "Port GoldHEN BinLoader listens on (default: 9090)",
-          "ftp_port": "Port GoldHEN FTP server listens on (default: 2121)",
-          "goldhen_port": "Port GoldHEN HTTP API listens on for power commands (default: 12800)"
+          "binloader_port": "BinLoader TCP port (default: 9090)",
+          "ftp_port": "GoldHEN FTP port used to verify connectivity (default: 2121)"
         }
       }
     },
     "error": {
-      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP address and make sure GoldHEN is running with FTP enabled."
+      "ftp_not_reachable": "Cannot reach the PS4 FTP service. Check the IP and ensure GoldHEN is running."
     }
   }
 }
