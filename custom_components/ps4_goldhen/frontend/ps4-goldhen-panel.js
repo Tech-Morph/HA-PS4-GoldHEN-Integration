@@ -121,26 +121,81 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
-  _downloadEntry(entry) {
-    const url = `/api/ps4_goldhen/ftp/download?entry_id=${this._panel.config.entry_id}&path=${encodeURIComponent(entry.path)}`;
-    window.open(url, "_blank");
+  async _downloadEntry(entry) {
+    this._loading = true;
+    this._render();
+    try {
+      const response = await fetch(`/api/ps4_goldhen/ftp/download?entry_id=${this._panel.config.entry_id}&path=${encodeURIComponent(entry.path)}`, {
+        headers: {
+          "Authorization": `Bearer ${this._hass.auth.accessToken}`
+        }
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = entry.name;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      a.remove();
+    } catch (e) {
+      alert(`Download failed: ${e.message}`);
+    } finally {
+      this._loading = false;
+      this._render();
+    }
+  }
+
+  async _uploadFile() {
+    const fileInput = this.shadowRoot.querySelector("#upload-input");
+    if (!fileInput || !fileInput.files.length) return;
+    
+    const file = fileInput.files[0];
+    this._loading = true;
+    this._render();
+
+    const formData = new FormData();
+    formData.append("entry_id", this._panel.config.entry_id);
+    formData.append("path", this._path);
+    formData.append("file", file);
+
+    try {
+      const response = await fetch("/api/ps4_goldhen/ftp/upload", {
+        method: "POST",
+        body: formData,
+        headers: {
+          "Authorization": `Bearer ${this._hass.auth.accessToken}`
+        }
+      });
+      if (!response.ok) throw new Error(await response.text());
+      this._loadDir();
+    } catch (e) {
+      alert(`Upload failed: ${e.message}`);
+    } finally {
+      this._loading = false;
+      this._render();
+    }
   }
 
   _render() {
     this.shadowRoot.innerHTML = html`
       <style>
         :host { display: block; padding: 16px; font-family: sans-serif; background: var(--primary-background-color); color: var(--primary-text-color); height: 100vh; overflow-y: auto; }
-        .header { display: flex; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color); padding-bottom: 8px; gap: 8px; }
-        .path { flex: 1; font-weight: bold; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        table { width: 100%; border-collapse: collapse; }
+        .header { display: flex; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color); padding-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+        .path { flex: 1; font-weight: bold; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 200px; }
+        .nav-btns { display: flex; gap: 4px; }
+        .upload-section { display: flex; align-items: center; gap: 8px; background: var(--secondary-background-color); padding: 4px 8px; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
         th { text-align: left; padding: 8px; border-bottom: 2px solid var(--divider-color); }
         td { padding: 8px; border-bottom: 1px solid var(--divider-color); vertical-align: middle; }
         tr:hover { background: var(--secondary-background-color); }
         .folder { color: var(--primary-color); cursor: pointer; text-decoration: underline; }
         .file { color: var(--primary-text-color); }
         .actions { display: flex; gap: 4px; }
-        .actions button { cursor: pointer; padding: 4px 8px; background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 4px; color: var(--primary-text-color); }
-        .actions button:hover { background: var(--secondary-background-color); }
+        .actions button, .nav-btns button { cursor: pointer; padding: 4px 8px; background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 4px; color: var(--primary-text-color); }
+        .actions button:hover, .nav-btns button:hover { background: var(--secondary-background-color); }
         .loading { font-style: italic; color: var(--secondary-text-color); margin-bottom: 8px; }
         
         /* Editor Overlay */
@@ -155,9 +210,16 @@ class PS4GoldHENPanel extends HTMLElement {
 
       <div class="header">
         <div class="path">PS4 FTP: ${this._path}</div>
-        <button id="btn-root">Root</button>
-        <button id="btn-back">Back</button>
-        <button id="btn-refresh">Refresh</button>
+        <div class="nav-btns">
+          <button id="btn-root">Root</button>
+          <button id="btn-up">Up</button>
+          <button id="btn-refresh">Refresh</button>
+        </div>
+        <div class="upload-section">
+          <input type="file" id="upload-input" style="display:none">
+          <button id="btn-select">Select File</button>
+          <button id="btn-upload">Upload to Current Folder</button>
+        </div>
       </div>
 
       ${this._loading ? '<div class="loading">Processing...</div>' : ""}
@@ -182,7 +244,7 @@ class PS4GoldHENPanel extends HTMLElement {
               <td>${e.is_dir ? "-" : (e.size / 1024 / 1024).toFixed(2) + " MB"}</td>
               <td>${e.modified}</td>
               <td class="actions">
-                ${!e.is_dir ? `<button data-action="download" data-path="${e.path}" title="Download">💾</button>` : ""}
+                ${!e.is_dir ? `<button data-action="download" data-path="${e.path}" data-name="${e.name}" title="Download">💾</button>` : ""}
                 ${!e.is_dir ? `<button data-action="edit" data-path="${e.path}" data-name="${e.name}" title="Edit">✏️</button>` : ""}
                 <button data-action="rename" data-path="${e.path}" data-name="${e.name}" title="Rename">🏷️</button>
                 <button data-action="delete" data-path="${e.path}" data-isdir="${e.is_dir}" data-name="${e.name}" title="Delete">🗑️</button>
@@ -232,25 +294,35 @@ class PS4GoldHENPanel extends HTMLElement {
         if (action === "delete") this._deleteEntry({ name, path, is_dir: isDir });
         else if (action === "rename") this._renameEntry({ name, path });
         else if (action === "edit") this._editEntry({ name, path });
-        else if (action === "download") this._downloadEntry({ path });
+        else if (action === "download") this._downloadEntry({ name, path });
       };
     }
 
-    // Header buttons
-    const btnRoot = this.shadowRoot.querySelector("#btn-root");
-    const btnUp = this.shadowRoot.querySelector("#btn-back");
-    const btnRefresh = this.shadowRoot.querySelector("#btn-refresh");
+    // Buttons
+    this.shadowRoot.querySelector("#btn-root").onclick = () => this._loadDir("/");
+    this.shadowRoot.querySelector("#btn-up").onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
+    this.shadowRoot.querySelector("#btn-refresh").onclick = () => this._loadDir();
+    
+    const btnSelect = this.shadowRoot.querySelector("#btn-select");
+    const uploadInput = this.shadowRoot.querySelector("#upload-input");
+    const btnUpload = this.shadowRoot.querySelector("#btn-upload");
+    
+    if (btnSelect) btnSelect.onclick = () => uploadInput.click();
+    if (btnUpload) btnUpload.onclick = () => this._uploadFile();
 
-    if (btnRoot) btnRoot.onclick = () => this._loadDir("/");
-    if (btnUp) btnUp.onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
-    if (btnRefresh) btnRefresh.onclick = () => this._loadDir();
+    // File input label change
+    if (uploadInput) {
+        uploadInput.onchange = () => {
+            if (uploadInput.files.length) {
+                btnUpload.textContent = `Upload: ${uploadInput.files[0].name}`;
+            }
+        };
+    }
 
     // Editor buttons
     if (this._editing) {
-      const btnCancel = this.shadowRoot.querySelector("#btn-cancel");
-      const btnSave = this.shadowRoot.querySelector("#btn-save");
-      if (btnCancel) btnCancel.onclick = () => { this._editing = null; this._render(); };
-      if (btnSave) btnSave.onclick = () => this._saveFile();
+      this.shadowRoot.querySelector("#btn-cancel").onclick = () => { this._editing = null; this._render(); };
+      this.shadowRoot.querySelector("#btn-save").onclick = () => this._saveFile();
     }
   }
 }
