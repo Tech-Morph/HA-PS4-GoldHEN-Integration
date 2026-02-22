@@ -1,41 +1,33 @@
-# Project: Home Assistant ↔ PS4 GoldHEN
+# Project / Roadmap — PS4 GoldHEN (Home Assistant)
 
-## Goal
-Build a HACS integration that connects to a jailbroken PS4 running GoldHEN and provides:
-- Payload sender to BinLoader (9090)
-- Sensors: CPU & RSX temps
-- Sensors: current game/app
-- Controls: view/change (launch) game/app
+This integration focuses on stable day-to-day tools for a GoldHEN-enabled PS4 inside Home Assistant.
 
-## Current status (Phase 1 implemented)
-✅ Payload sender:
-- HA service `ps4_goldhen.send_payload` streams a local .bin over TCP to the PS4 BinLoader port.
+## Current scope
 
-✅ Health sensors:
-- TCP reachability sensor for BinLoader (default 9090)
-- TCP reachability sensor for FTP (default 2121)
+- Sidebar dashboard panel:
+  - FTP browser/editor (browse, download, upload, rename, delete, edit text)
+  - BinLoader sender (send `.bin` / `.elf` payloads on demand)
+- HA service: `ps4_goldhen.send_payload`
+- FTP reachability sensor (polls FTP only)
 
-## Known constraints / research notes
-- GoldHEN release notes list an FTP server (2121) and BinLoader server (9090).
-- GoldHEN warns BinLoader is experimental; payloads can crash the console.
+## Explicitly out of scope (for now)
 
-## Phase 2 (needs a telemetry/control API)
-We still need a verified mechanism to:
-- Read CPU + RSX/SOC temps programmatically over the network
-- Identify the currently running title
-- Launch/switch titles
+- Remote PKG / Remote Package Installer support.
+  - Rationale: it adds security and reliability pitfalls (auth, large file handling, PS4 HTTP compatibility), and isn’t needed for the core goal of payload delivery + FTP management.
 
-Options:
-A) Use an existing payload/service that exposes this over the network (ex: PS4Debug or another telemetry payload).
-B) Write a small custom PS4 payload that exposes:
-   - GET /temps -> { cpu_c, rsx_c }
-   - GET /title -> { title_id, title_name }
-   - POST /launch { title_id }
+## Planned / ideas
 
-Next step for you:
-- Tell me what you already run on the PS4 besides GoldHEN (PS4Debug? Orbis Toolbox? any overlay/sysinfo plugin?).
-- If you can, share what firmware + GoldHEN version you’re on and whether you can run additional payloads at boot.
+- GoldHEN API sensors (if stable across versions):
+  - Console temperature / fan
+  - Current title / running app
+  - Free space info
+- Quality-of-life:
+  - Payload library management in the UI (upload payloads into `/config/ps4_payloads/`)
+  - Optional “favorites” payload list per PS4 entry
+- Diagnostics:
+  - Better error reporting for FTP failures and BinLoader connection issues
 
-## Change log
-- 0.1.0: Initial HACS integration: payload sender + connectivity sensors
-- 0.1.1: Removed periodic TCP probing of BinLoader (9090) because it can destabilize GoldHEN BinLoader; only probe FTP (2121). Payload send still uses 9090 on demand.
+## Notes
+
+- BinLoader should not be polled; only connect when sending a payload.
+- For dashboard assets, keep the logo as a transparent PNG for best appearance.
