@@ -25,15 +25,24 @@ class PS4GoldHENPanel extends HTMLElement {
     this._entries = [];
     this._selectedEntryId = null;
 
+    // FTP state
     this._path = "/";
     this._ftpEntries = [];
     this._editing = null;
 
-    this._installStatus = "";
+    // BinLoader state
+    this._payloads = [];
+    this._selectedPayload = "";
+    this._payloadDir = "";
+    this._binHost = "";
+    this._binPort = "";
+    this._binTimeout = "30";
+    this._binStatus = "";
   }
 
   async _init() {
     await this._loadEntries();
+    await this._loadPayloads();
     if (this._selectedEntryId) await this._loadDir("/");
     this._render();
   }
@@ -51,6 +60,12 @@ class PS4GoldHENPanel extends HTMLElement {
       const configured = this._panel?.config?.entry_id;
       const first = this._entries[0]?.entry_id || null;
       this._selectedEntryId = configured || this._selectedEntryId || first;
+
+      const entry = this._selectedEntry();
+      if (entry) {
+        this._binHost = entry.ps4_host || "";
+        this._binPort = String(entry.binloader_port ?? "");
+      }
     } catch (e) {
       this._entries = [];
       this._selectedEntryId = null;
@@ -62,7 +77,7 @@ class PS4GoldHENPanel extends HTMLElement {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
   }
 
-  // --- Signed path helper (avoids Bearer header problems) ---
+  // --- Signed path helper (kept for FTP downloads/uploads) ---
   async _signedPath(path) {
     const resp = await this._hass.callWS({ type: "auth/sign_path", path });
     return resp.path;
@@ -71,6 +86,23 @@ class PS4GoldHENPanel extends HTMLElement {
   async _signedFetch(path, options = {}) {
     const signed = await this._signedPath(path);
     return fetch(signed, { credentials: "same-origin", ...options });
+  }
+
+  async _loadPayloads() {
+    if (!this._hass) return;
+    try {
+      const resp = await this._hass.callWS({ type: "ps4_goldhen/list_payloads" });
+      this._payloads = resp.payloads || [];
+      this._payloadDir = resp.payload_dir || "";
+      if (!this._selectedPayload && this._payloads.length) {
+        this._selectedPayload = this._payloads[0];
+      }
+    } catch (e) {
+      this._payloads = [];
+      this._payloadDir = "";
+      this._selectedPayload = "";
+      this._binStatus = `Failed to list payloads: ${e.message || e}`;
+    }
   }
 
   // FTP
@@ -217,88 +249,38 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
-  // Installer
-  async _installFromUrl() {
+  // BinLoader
+  async _sendPayload() {
     const entry = this._selectedEntry();
     if (!entry) {
       alert("Select a PS4 first.");
       return;
     }
-
-    const url = (this.shadowRoot.querySelector("#pkg-url")?.value || "").trim();
-    const portStr = (this.shadowRoot.querySelector("#pkg-port")?.value || "").trim();
-    if (!url) {
-      alert("Enter a PKG URL.");
+    const payload = (this.shadowRoot.querySelector("#payload-select")?.value || "").trim();
+    if (!payload) {
+      alert("Select a payload first.");
       return;
     }
 
+    const host = (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() || entry.ps4_host;
+    const port = parseInt((this.shadowRoot.querySelector("#bin-port")?.value || "").trim() || entry.binloader_port, 10);
+    const timeout = parseFloat((this.shadowRoot.querySelector("#bin-timeout")?.value || "30").trim());
+
     this._setLoading(true);
-    this._installStatus = "Sending install request...";
+    this._binStatus = "Sending payload...";
     this._render();
 
     try {
-      const msg = {
-        type: "ps4_goldhen/rpi_install_url",
-        entry_id: this._selectedEntryId,
-        url: url,
-      };
-      if (portStr) msg.port = parseInt(portStr, 10);
-
-      await this._hass.callWS(msg);
-      this._installStatus = "Install request sent. Check PS4 download/install progress.";
-    } catch (e) {
-      this._installStatus = `Install failed: ${e.message || e}`;
-      alert(this._installStatus);
-    } finally {
-      this._setLoading(false);
-    }
-  }
-
-  async _uploadAndInstallLocalPkg() {
-    const entry = this._selectedEntry();
-    if (!entry) {
-      alert("Select a PS4 first.");
-      return;
-    }
-
-    const fileInput = this.shadowRoot.querySelector("#local-pkg-input");
-    if (!fileInput || !fileInput.files.length) {
-      alert("Choose a .pkg file first.");
-      return;
-    }
-
-    const portStr = (this.shadowRoot.querySelector("#local-pkg-port")?.value || "").trim();
-    const file = fileInput.files[0];
-
-    this._setLoading(true);
-    this._installStatus = `Uploading ${file.name}...`;
-    this._render();
-
-    try {
-      // Mint one-time upload token (WS is already authenticated)
-      const tok = await this._hass.callWS({
-        type: "ps4_goldhen/rpi_begin_upload",
-        entry_id: this._selectedEntryId,
+      await this._hass.callService("ps4_goldhen", "send_payload", {
+        payload_file: payload,
+        ps4_host: host,
+        binloader_port: port,
+        timeout: timeout,
       });
-
-      const formData = new FormData();
-      if (portStr) formData.append("port", portStr);
-      formData.append("file", file);
-
-      // Tokenized endpoint (LAN-only + one-time token)
-      const resp = await fetch(`/api/ps4_goldhen/rpi/upload_install/${tok.token}`, {
-        method: "POST",
-        body: formData,
-      });
-
-      const text = await resp.text();
-      if (!resp.ok) throw new Error(text);
-
-      const data = JSON.parse(text);
-      this._installStatus = `Upload complete. Install started on PS4 (${data.ps4_host}:${data.ps4_port}).`;
+      this._binStatus = "Payload sent successfully.";
     } catch (e) {
-      this._installStatus = `Upload/install failed: ${e.message || e}`;
-      alert(this._installStatus);
+      this._binStatus = `Send failed: ${e.message || e}`;
+      alert(this._binStatus);
     } finally {
       this._setLoading(false);
     }
@@ -312,7 +294,7 @@ class PS4GoldHENPanel extends HTMLElement {
       <style>
         :host { display:block; padding:16px; font-family:sans-serif; background:var(--primary-background-color); color:var(--primary-text-color); height:100vh; overflow-y:auto; }
         .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding-bottom:12px; border-bottom:1px solid var(--divider-color); margin-bottom:12px; }
-        .title { font-weight:700; font-size:18px; }
+        .logo { height:44px; width:auto; display:block; }
         .picker { display:flex; gap:8px; align-items:center; background:var(--secondary-background-color); padding:8px 10px; border-radius:6px; flex-wrap:wrap; }
         select, input[type="text"], input[type="number"] { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); }
         .tabs { display:flex; gap:8px; margin:12px 0 16px 0; flex-wrap:wrap; }
@@ -345,7 +327,7 @@ class PS4GoldHENPanel extends HTMLElement {
       </style>
 
       <div class="topbar">
-        <div class="title">PS4 GoldHEN Dashboard</div>
+        <img class="logo" src="/api/ps4_goldhen/frontend/goldhen_logo.png" alt="GoldHEN">
         <div class="picker">
           <div>
             <div class="muted">Selected PS4</div>
@@ -366,13 +348,13 @@ class PS4GoldHENPanel extends HTMLElement {
 
       <div class="tabs">
         <button class="tabbtn ${this._tab === "ftp" ? "active" : ""}" data-tab="ftp">FTP</button>
-        <button class="tabbtn ${this._tab === "installer" ? "active" : ""}" data-tab="installer">Installer</button>
+        <button class="tabbtn ${this._tab === "binloader" ? "active" : ""}" data-tab="binloader">BinLoader</button>
       </div>
 
       ${this._loading ? `<div class="loading">Processing...</div>` : ""}
 
       ${this._tab === "ftp" ? this._renderFtp() : ""}
-      ${this._tab === "installer" ? this._renderInstaller() : ""}
+      ${this._tab === "binloader" ? this._renderBinLoader() : ""}
 
       ${this._editing ? this._renderEditor() : ""}
     `;
@@ -384,7 +366,15 @@ class PS4GoldHENPanel extends HTMLElement {
         this._editing = null;
         this._path = "/";
         this._ftpEntries = [];
+
+        const entry = this._selectedEntry();
+        if (entry) {
+          this._binHost = entry.ps4_host || "";
+          this._binPort = String(entry.binloader_port ?? "");
+        }
+
         await this._loadDir("/");
+        this._render();
       };
     }
 
@@ -393,6 +383,7 @@ class PS4GoldHENPanel extends HTMLElement {
       reloadBtn.onclick = async () => {
         this._setLoading(true);
         await this._loadEntries();
+        await this._loadPayloads();
         this._setLoading(false);
         if (this._selectedEntryId) await this._loadDir("/");
       };
@@ -407,12 +398,16 @@ class PS4GoldHENPanel extends HTMLElement {
 
     if (this._tab === "ftp") this._bindFtpEvents();
 
-    if (this._tab === "installer") {
-      const btnInstallUrl = this.shadowRoot.querySelector("#btn-install-url");
-      if (btnInstallUrl) btnInstallUrl.onclick = () => this._installFromUrl();
+    if (this._tab === "binloader") {
+      const btn = this.shadowRoot.querySelector("#btn-send-payload");
+      if (btn) btn.onclick = () => this._sendPayload();
 
-      const btnLocalInstall = this.shadowRoot.querySelector("#btn-install-local");
-      if (btnLocalInstall) btnLocalInstall.onclick = () => this._uploadAndInstallLocalPkg();
+      const refreshPayloads = this.shadowRoot.querySelector("#btn-refresh-payloads");
+      if (refreshPayloads) refreshPayloads.onclick = async () => {
+        this._setLoading(true);
+        await this._loadPayloads();
+        this._setLoading(false);
+      };
     }
 
     if (this._editing) {
@@ -466,6 +461,32 @@ class PS4GoldHENPanel extends HTMLElement {
     `;
   }
 
+  _renderBinLoader() {
+    return html`
+      <div class="card">
+        <h3>Send payload</h3>
+        <div class="row">
+          <select id="payload-select" style="min-width:320px;">
+            ${this._payloads.map(p => {
+              const sel = p === this._selectedPayload ? "selected" : "";
+              return `<option value="${p}" ${sel}>${p}</option>`;
+            }).join("")}
+          </select>
+          <button class="btn" id="btn-refresh-payloads">Refresh payload list</button>
+        </div>
+        <div class="muted">Payload directory on HA: ${this._payloadDir || "(unknown)"}</div>
+        <div class="row" style="margin-top:10px;">
+          <input id="bin-host" type="text" placeholder="PS4 Host" value="${this._binHost}" style="min-width:240px;">
+          <input id="bin-port" type="number" placeholder="Port" value="${this._binPort}" style="width:160px;">
+          <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="${this._binTimeout}" style="width:160px;">
+          <button class="btn" id="btn-send-payload">Send</button>
+        </div>
+      </div>
+
+      ${this._binStatus ? `<div class="card"><h3>Status</h3><div>${this._binStatus}</div></div>` : ""}
+    `;
+  }
+
   _bindFtpEvents() {
     const table = this.shadowRoot.querySelector("table");
     if (table) {
@@ -512,32 +533,6 @@ class PS4GoldHENPanel extends HTMLElement {
           : "Upload to Current Folder";
       };
     }
-  }
-
-  _renderInstaller() {
-    return html`
-      <div class="card">
-        <h3>Install from URL</h3>
-        <div class="row">
-          <input id="pkg-url" type="text" placeholder="http://server/game.pkg" style="min-width:420px; flex:1;">
-          <input id="pkg-port" type="number" placeholder="Port (optional)" style="width:240px;">
-          <button class="btn" id="btn-install-url">Install URL</button>
-        </div>
-        <div class="muted">Sends URL to PS4 installer (port 12800 by default).</div>
-      </div>
-
-      <div class="card">
-        <h3>Install local file (select from this device)</h3>
-        <div class="row">
-          <input id="local-pkg-input" type="file" accept=".pkg" style="min-width:420px; flex:1;">
-          <input id="local-pkg-port" type="number" placeholder="Port override (optional)" style="width:240px;">
-          <button class="btn" id="btn-install-local">Upload & Install</button>
-        </div>
-        <div class="muted">Large PKGs require free space in /config on HAOS while the PS4 downloads.</div>
-      </div>
-
-      ${this._installStatus ? `<div class="card"><h3>Status</h3><div>${this._installStatus}</div></div>` : ""}
-    `;
   }
 
   _renderEditor() {
