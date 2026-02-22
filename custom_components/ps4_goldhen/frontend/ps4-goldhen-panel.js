@@ -263,7 +263,10 @@ class PS4GoldHENPanel extends HTMLElement {
     }
 
     const host = (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() || entry.ps4_host;
-    const port = parseInt((this.shadowRoot.querySelector("#bin-port")?.value || "").trim() || entry.binloader_port, 10);
+    const port = parseInt(
+      (this.shadowRoot.querySelector("#bin-port")?.value || "").trim() || entry.binloader_port,
+      10
+    );
     const timeout = parseFloat((this.shadowRoot.querySelector("#bin-timeout")?.value || "30").trim());
 
     this._setLoading(true);
@@ -403,11 +406,13 @@ class PS4GoldHENPanel extends HTMLElement {
       if (btn) btn.onclick = () => this._sendPayload();
 
       const refreshPayloads = this.shadowRoot.querySelector("#btn-refresh-payloads");
-      if (refreshPayloads) refreshPayloads.onclick = async () => {
-        this._setLoading(true);
-        await this._loadPayloads();
-        this._setLoading(false);
-      };
+      if (refreshPayloads) {
+        refreshPayloads.onclick = async () => {
+          this._setLoading(true);
+          await this._loadPayloads();
+          this._setLoading(false);
+        };
+      }
     }
 
     if (this._editing) {
