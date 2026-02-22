@@ -64,8 +64,6 @@ class PS4GoldHENPanel extends HTMLElement {
 
   // --- Signed path helper (avoids Bearer header problems) ---
   async _signedPath(path) {
-    // HA websocket command: auth/sign_path. [web:110]
-    // Returns { path: "/api/...?...&authSig=..." }.
     const resp = await this._hass.callWS({ type: "auth/sign_path", path });
     return resp.path;
   }
@@ -276,13 +274,19 @@ class PS4GoldHENPanel extends HTMLElement {
     this._installStatus = `Uploading ${file.name}...`;
     this._render();
 
-    const formData = new FormData();
-    formData.append("entry_id", this._selectedEntryId);
-    if (portStr) formData.append("port", portStr);
-    formData.append("file", file);
-
     try {
-      const resp = await this._signedFetch("/api/ps4_goldhen/rpi/upload_install", {
+      // Mint one-time upload token (WS is already authenticated)
+      const tok = await this._hass.callWS({
+        type: "ps4_goldhen/rpi_begin_upload",
+        entry_id: this._selectedEntryId,
+      });
+
+      const formData = new FormData();
+      if (portStr) formData.append("port", portStr);
+      formData.append("file", file);
+
+      // Tokenized endpoint (LAN-only + one-time token)
+      const resp = await fetch(`/api/ps4_goldhen/rpi/upload_install/${tok.token}`, {
         method: "POST",
         body: formData,
       });
