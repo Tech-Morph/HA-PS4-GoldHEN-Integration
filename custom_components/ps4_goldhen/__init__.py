@@ -47,7 +47,7 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.0"
+_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.1"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 
 
@@ -96,7 +96,7 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
             module_url=_JS_MODULE_URL,
             sidebar_title=_PANEL_SIDEBAR_TITLE,
             sidebar_icon=_PANEL_SIDEBAR_ICON,
-            config={},  # global selector in UI
+            config={},
             require_admin=False,
         )
         g["panel_registered"] = True
@@ -194,7 +194,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await coordinator.async_config_entry_first_refresh()
 
-    # IMPORTANT: websocket.py expects hass.data[DOMAIN][entry_id] to exist.
     root = _ensure_domain_root(hass)
     root[entry.entry_id] = {
         "coordinator": coordinator,
@@ -203,17 +202,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ftp_port": ftp_port,
     }
 
-    # Register WS commands once
     g = _global(hass)
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
         websocket_api.async_register_command(hass, ws_list_payloads)
         g["ws_registered"] = True
 
-    # Panel + static assets once
     await _register_frontend_and_panel_once(hass)
 
-    # ── Services (payload sender) ───────────────────────────────────────────────
     _SEND_PAYLOAD_SCHEMA = vol.Schema(
         {
             vol.Required("payload_file"): str,
@@ -236,12 +232,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
         hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
 
-    # ── Existing FTP WebSocket API ─────────────────────────────────────────────
     from .websocket import async_setup as async_setup_websocket
 
     async_setup_websocket(hass)
 
-    # Existing FTP Views
     hass.http.register_view(PS4FTPDownloadView())
     hass.http.register_view(PS4FTPUploadView())
 
