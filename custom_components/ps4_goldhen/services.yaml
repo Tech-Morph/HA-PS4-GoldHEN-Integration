@@ -2,14 +2,12 @@ send_payload:
   name: Send Payload
   description: >-
     Stream a .bin or .elf payload file to the PS4 GoldHEN BinLoader over TCP.
-    The file must exist on the Home Assistant host at the path specified
-    (absolute) or inside /config/ps4_payloads/ (bare filename).
+    The file must exist on the Home Assistant host at the path specified (absolute) or inside /config/ps4_payloads/ (bare filename).
   fields:
     payload_file:
       name: Payload File
       description: >-
-        Filename (e.g. goldhen.bin or payload.elf) relative to /config/ps4_payloads/,
-        or an absolute path on the HA host.
+        Filename (e.g. goldhen.bin or payload.elf) relative to /config/ps4_payloads/, or an absolute path on the HA host.
       required: true
       example: goldhen.bin
       selector:
@@ -40,4 +38,49 @@ send_payload:
         number:
           min: 1
           max: 300
+          mode: box
+
+install_pkg:
+  name: Install PKG
+  description: >-
+    Send a direct PKG download URL to your PS4 or PS5.
+    Supports Remote Package Installer (RPI), etaHEN (DPI style), and GoldHEN.
+  fields:
+    url:
+      name: PKG URL
+      description: The direct download link to the PKG file.
+      required: true
+      example: "http://192.168.1.50/game.pkg"
+      selector:
+        text:
+    method:
+      name: Install Method
+      description: The installation API to use.
+      required: false
+      default: rpi
+      selector:
+        select:
+          options:
+            - label: "Remote Package Installer (RPI)"
+              value: rpi
+            - label: "etaHEN (DPIv2)"
+              value: etahen
+            - label: "GoldHEN"
+              value: goldhen
+    ps4_host:
+      name: Host (optional)
+      description: Override the console IP for this call.
+      required: false
+      example: 192.168.1.100
+      selector:
+        text:
+    port:
+      name: Port (optional)
+      description: Override the API port (Default is 12800).
+      required: false
+      example: 12800
+      selector:
+        number:
+          min: 1
+          max: 65535
           mode: box
