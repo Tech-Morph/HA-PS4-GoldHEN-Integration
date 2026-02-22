@@ -62,6 +62,19 @@ class PS4GoldHENPanel extends HTMLElement {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
   }
 
+  // --- Signed path helper (avoids Bearer header problems) ---
+  async _signedPath(path) {
+    // HA websocket command: auth/sign_path. [web:110]
+    // Returns { path: "/api/...?...&authSig=..." }.
+    const resp = await this._hass.callWS({ type: "auth/sign_path", path });
+    return resp.path;
+  }
+
+  async _signedFetch(path, options = {}) {
+    const signed = await this._signedPath(path);
+    return fetch(signed, { credentials: "same-origin", ...options });
+  }
+
   // FTP
   async _loadDir(path = this._path) {
     if (!this._hass || !this._selectedEntryId) return;
@@ -157,11 +170,13 @@ class PS4GoldHENPanel extends HTMLElement {
   async _downloadEntry(entry) {
     this._setLoading(true);
     try {
-      const response = await fetch(
-        `/api/ps4_goldhen/ftp/download?entry_id=${this._selectedEntryId}&path=${encodeURIComponent(entry.path)}`,
-        { headers: { Authorization: `Bearer ${this._hass.auth.accessToken}` } }
-      );
+      const rel = `/api/ps4_goldhen/ftp/download?entry_id=${this._selectedEntryId}&path=${encodeURIComponent(
+        entry.path
+      )}`;
+
+      const response = await this._signedFetch(rel, { method: "GET" });
       if (!response.ok) throw new Error(await response.text());
+
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -191,10 +206,9 @@ class PS4GoldHENPanel extends HTMLElement {
     formData.append("file", file);
 
     try {
-      const response = await fetch("/api/ps4_goldhen/ftp/upload", {
+      const response = await this._signedFetch("/api/ps4_goldhen/ftp/upload", {
         method: "POST",
         body: formData,
-        headers: { Authorization: `Bearer ${this._hass.auth.accessToken}` },
       });
       if (!response.ok) throw new Error(await response.text());
       await this._loadDir();
@@ -232,7 +246,7 @@ class PS4GoldHENPanel extends HTMLElement {
       };
       if (portStr) msg.port = parseInt(portStr, 10);
 
-      const resp = await this._hass.callWS(msg);
+      await this._hass.callWS(msg);
       this._installStatus = "Install request sent. Check PS4 download/install progress.";
     } catch (e) {
       this._installStatus = `Install failed: ${e.message || e}`;
@@ -268,18 +282,16 @@ class PS4GoldHENPanel extends HTMLElement {
     formData.append("file", file);
 
     try {
-      const resp = await fetch("/api/ps4_goldhen/rpi/upload_install", {
+      const resp = await this._signedFetch("/api/ps4_goldhen/rpi/upload_install", {
         method: "POST",
         body: formData,
-        headers: { Authorization: `Bearer ${this._hass.auth.accessToken}` },
       });
 
       const text = await resp.text();
       if (!resp.ok) throw new Error(text);
 
       const data = JSON.parse(text);
-      this._installStatus =
-        `Upload complete. Install started on PS4 (${data.ps4_host}:${data.ps4_port}).`;
+      this._installStatus = `Upload complete. Install started on PS4 (${data.ps4_host}:${data.ps4_port}).`;
     } catch (e) {
       this._installStatus = `Upload/install failed: ${e.message || e}`;
       alert(this._installStatus);
@@ -307,7 +319,6 @@ class PS4GoldHENPanel extends HTMLElement {
         .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
         .muted { color:var(--secondary-text-color); font-size:13px; }
 
-        /* FTP */
         .header { display:flex; align-items:center; margin-bottom:16px; border-bottom:1px solid var(--divider-color); padding-bottom:8px; gap:8px; flex-wrap:wrap; }
         .path { flex:1; font-weight:bold; font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:200px; }
         .nav-btns { display:flex; gap:4px; }
@@ -321,7 +332,6 @@ class PS4GoldHENPanel extends HTMLElement {
         .actions button, .nav-btns button, .btn { cursor:pointer; padding:6px 10px; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; color:var(--primary-text-color); }
         .actions button:hover, .nav-btns button:hover, .btn:hover { background:var(--secondary-background-color); }
 
-        /* Editor overlay */
         .editor-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:1000; }
         .editor-container { background:var(--primary-background-color); width:90%; height:90%; display:flex; flex-direction:column; padding:16px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.5); }
         #editor-textarea { flex:1; font-family:Consolas,Monaco,monospace; font-size:14px; padding:12px; border:1px solid var(--divider-color); background:var(--secondary-background-color); color:var(--primary-text-color); resize:none; outline:none; }
@@ -363,7 +373,6 @@ class PS4GoldHENPanel extends HTMLElement {
       ${this._editing ? this._renderEditor() : ""}
     `;
 
-    // Entry picker
     const sel = this.shadowRoot.querySelector("#entry-select");
     if (sel) {
       sel.onchange = async () => {
@@ -385,7 +394,6 @@ class PS4GoldHENPanel extends HTMLElement {
       };
     }
 
-    // Tabs
     this.shadowRoot.querySelectorAll(".tabbtn").forEach((b) => {
       b.onclick = () => {
         this._tab = b.dataset.tab;
@@ -393,10 +401,8 @@ class PS4GoldHENPanel extends HTMLElement {
       };
     });
 
-    // FTP bindings
     if (this._tab === "ftp") this._bindFtpEvents();
 
-    // Installer bindings
     if (this._tab === "installer") {
       const btnInstallUrl = this.shadowRoot.querySelector("#btn-install-url");
       if (btnInstallUrl) btnInstallUrl.onclick = () => this._installFromUrl();
@@ -405,7 +411,6 @@ class PS4GoldHENPanel extends HTMLElement {
       if (btnLocalInstall) btnLocalInstall.onclick = () => this._uploadAndInstallLocalPkg();
     }
 
-    // Editor buttons
     if (this._editing) {
       const cancel = this.shadowRoot.querySelector("#btn-cancel");
       const save = this.shadowRoot.querySelector("#btn-save");
