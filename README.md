@@ -8,8 +8,6 @@ A [HACS](https://hacs.xyz) custom integration for Home Assistant that provides:
 - A service to send `.bin` / `.elf` payloads to GoldHEN BinLoader over TCP.
 - An FTP reachability sensor (safe periodic polling of FTP only).
 
-This integration intentionally does **not** include a Remote PKG installer.
-
 ---
 
 ## Features
@@ -54,16 +52,3 @@ This integration intentionally does **not** include a Remote PKG installer.
     - FTP port (default 2121)
 
 ---
-
-## Dashboard logo (optional)
-
-The sidebar panel can show a logo image instead of a text header.
-
-Place a transparent PNG here on your Home Assistant host:
-
-`/config/custom_components/ps4_goldhen/frontend/goldhen_logo.png`
-
-If you only have a JPG with a white background, convert it to a transparent PNG (example with ImageMagick):
-
-```bash
-magick goldhen_logo.jpg -fuzz 6% -transparent white goldhen_logo.png
