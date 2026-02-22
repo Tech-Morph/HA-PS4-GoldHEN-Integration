@@ -1,16 +1,25 @@
 # PS4 GoldHEN — Home Assistant Integration
 
-![version](https://img.shields.io/badge/version-0.7.2-blue)
+![version](https://img.shields.io/badge/version-0.8.0-blue)
 
-A [HACS](https://hacs.xyz) custom integration for Home Assistant that lets you send `.bin` payloads to a **PS4 running GoldHEN** via the BinLoader TCP service.
+A [HACS](https://hacs.xyz) custom integration for Home Assistant that provides:
+
+- A sidebar **dashboard panel** (FTP + BinLoader tools).
+- A service to send `.bin` / `.elf` payloads to GoldHEN BinLoader over TCP.
+- An FTP reachability sensor (safe periodic polling of FTP only).
+
+This integration intentionally does **not** include a Remote PKG installer.
 
 ---
 
-## Features (v0.5.0)
+## Features
 
-- **Send Payloads** — stream any `.bin` file to GoldHEN BinLoader over TCP (default port 9090).
-- **FTP Connectivity Sensor** — polls GoldHEN FTP (default port 2121) every 30 s and reports `online` / `offline`.
-  > BinLoader (9090) is intentionally **not** polled on a schedule — repeated probe connections can destabilise the GoldHEN BinLoader service. Payloads are only sent on demand.
+- **Sidebar dashboard** — appears in Home Assistant’s sidebar as “PS4 GoldHEN” with icon `mdi:sony-playstation`.
+- **BinLoader sender** — sends selected payloads to the configured PS4 BinLoader port (default 9090).
+- **FTP dashboard tools** — browse/list, download, upload, rename, delete, and edit text files via FTP.
+- **FTP connectivity sensor** — polls GoldHEN FTP (default 2121) every 30 seconds and reports reachable/unreachable.
+
+> BinLoader (9090) is intentionally not polled on a schedule — repeated probe connections can destabilize the GoldHEN BinLoader service. Payloads are only sent on demand.
 
 ---
 
@@ -21,50 +30,40 @@ A [HACS](https://hacs.xyz) custom integration for Home Assistant that lets you s
 | PS4 firmware | GoldHEN installed and running |
 | BinLoader | enabled in GoldHEN, listening on port **9090** (configurable) |
 | FTP | GoldHEN FTP enabled on port **2121** (configurable) |
-| Payload files | `.bin` files placed in `/config/ps4_payloads/` on the HA host |
+| Payload files | `.bin` / `.elf` placed in `/config/ps4_payloads/` on the HA host |
 
 ---
 
-## Install via HACS
+## Install via HACS (Custom Repository)
 
-1. **HACS → Integrations → ⋮ → Custom repositories**
-2. Add `https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration` as type **Integration**.
-3. Click **Download**.
-4. Restart Home Assistant.
-5. **Settings → Devices & Services → Add Integration → "PS4 GoldHEN"**.
-6. Enter your PS4 IP, BinLoader port, and FTP port.
+1. Install HACS if you haven’t already: https://hacs.xyz
+2. In Home Assistant: **HACS → Integrations**
+3. Open the menu (⋮) → **Custom repositories**
+4. Add this repository URL:
 
----
+   `https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration`
 
-## Usage
-
-### Service: `ps4_goldhen.send_payload`
-
-Send a payload from Home Assistant to GoldHEN BinLoader.
-
-```yaml
-service: ps4_goldhen.send_payload
-data:
-  payload_file: goldhen.bin        # filename inside /config/ps4_payloads/
-  # ps4_host: 192.168.1.100        # optional override
-  # binloader_port: 9090           # optional override
-  # timeout: 30                    # optional, seconds
-```
-
-**Payload directory:** `/config/ps4_payloads/` (created automatically on HA host).
+5. Set **Category** to **Integration**
+6. Click **Add**
+7. Find “PS4 GoldHEN — Home Assistant Integration” in HACS and click **Download**
+8. Restart Home Assistant
+9. Go to **Settings → Devices & Services → Add Integration → “PS4 GoldHEN”**
+10. Enter:
+    - PS4 IP / Host
+    - BinLoader port (default 9090)
+    - FTP port (default 2121)
 
 ---
 
-## Roadmap
+## Dashboard logo (optional)
 
-See [docs/PROJECT.md](docs/PROJECT.md) for planned features:
-- PS4 temperature sensors (via GoldHEN API)
-- Current game title sensor
-- App / game switching
-- More to come...
+The sidebar panel can show a logo image instead of a text header.
 
----
+Place a transparent PNG here on your Home Assistant host:
 
-## License
+`/config/custom_components/ps4_goldhen/frontend/goldhen_logo.png`
 
-MIT
+If you only have a JPG with a white background, convert it to a transparent PNG (example with ImageMagick):
+
+```bash
+magick goldhen_logo.jpg -fuzz 6% -transparent white goldhen_logo.png
