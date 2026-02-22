@@ -1,6 +1,6 @@
 # PS4 GoldHEN — Home Assistant Integration
 
-![version](https://img.shields.io/badge/version-0.5.0-blue)
+![version](https://img.shields.io/badge/version-0.7.2-blue)
 
 A [HACS](https://hacs.xyz) custom integration for Home Assistant that lets you send `.bin` payloads to a **PS4 running GoldHEN** via the BinLoader TCP service.
 
