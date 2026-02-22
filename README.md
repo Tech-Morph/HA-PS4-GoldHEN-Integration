@@ -1,6 +1,6 @@
 # PS4 GoldHEN — Home Assistant Integration
 
-![version](https://img.shields.io/badge/version-0.8.0-blue)
+![version](https://img.shields.io/badge/version-0.8.1-blue)
 
 A [HACS](https://hacs.xyz) custom integration for Home Assistant that provides:
 
