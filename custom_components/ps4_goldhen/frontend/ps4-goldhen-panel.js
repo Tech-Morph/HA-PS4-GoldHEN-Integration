@@ -77,7 +77,7 @@ class PS4GoldHENPanel extends HTMLElement {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
   }
 
-  // --- Signed path helper (kept for FTP downloads/uploads) ---
+  // Signed paths are ideal for GET downloads; uploads should use authenticated fetch. [web:38][web:202]
   async _signedPath(path) {
     const resp = await this._hass.callWS({ type: "auth/sign_path", path });
     return resp.path;
@@ -86,6 +86,14 @@ class PS4GoldHENPanel extends HTMLElement {
   async _signedFetch(path, options = {}) {
     const signed = await this._signedPath(path);
     return fetch(signed, { credentials: "same-origin", ...options });
+  }
+
+  async _authFetch(path, options = {}) {
+    if (this._hass && typeof this._hass.fetchWithAuth === "function") {
+      return this._hass.fetchWithAuth(path, options);
+    }
+    // Fallback: try normal fetch with cookies (may still fail depending on auth setup)
+    return fetch(path, { credentials: "same-origin", ...options });
   }
 
   async _loadPayloads() {
@@ -236,7 +244,8 @@ class PS4GoldHENPanel extends HTMLElement {
     formData.append("file", file);
 
     try {
-      const response = await this._signedFetch("/api/ps4_goldhen/ftp/upload", {
+      // Use authenticated fetch for POST uploads. [web:202]
+      const response = await this._authFetch("/api/ps4_goldhen/ftp/upload", {
         method: "POST",
         body: formData,
       });
@@ -483,7 +492,7 @@ class PS4GoldHENPanel extends HTMLElement {
         <div class="row" style="margin-top:10px;">
           <input id="bin-host" type="text" placeholder="PS4 Host" value="${this._binHost}" style="min-width:240px;">
           <input id="bin-port" type="number" placeholder="Port" value="${this._binPort}" style="width:160px;">
-          <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="${this._binTimeout}" style="width:160px;">
+          <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="30" style="width:160px;">
           <button class="btn" id="btn-send-payload">Send</button>
         </div>
       </div>
