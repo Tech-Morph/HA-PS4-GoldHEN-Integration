@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import secrets
@@ -10,14 +11,14 @@ import time
 from datetime import timedelta
 from typing import Any
 
-from aiohttp import ClientError, web
+from aiohttp import ClientError, ClientTimeout, web
 import voluptuous as vol
 
 from homeassistant.components import frontend, panel_custom, websocket_api
 from homeassistant.components.frontend import StaticPathConfig
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -54,14 +55,20 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 # Frontend JS static path (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 # Module URL can include a cache-busting query string
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.7.2"
+_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.7.3"
 
 # RPI installer constants
 _RPI_TMP_DIR = "ps4_goldhen_rpi_tmp"
 _RPI_TOKEN_TTL_SECONDS = 3 * 60 * 60  # 3 hours
 _RPI_MAX_UPLOAD_BYTES = int(110 * 1024 * 1024 * 1024)  # ~110 GiB
 
+# Authenticated upload endpoint (kept for API/automation use if needed)
 _RPI_UPLOAD_INSTALL_URL = "/api/ps4_goldhen/rpi/upload_install"
+
+# Tokenized upload (fixes 401 from panel POST uploads)
+_RPI_UPLOAD_TOKEN_TTL_SECONDS = 5 * 60  # 5 minutes
+_RPI_UPLOAD_TOKENS_KEY = "rpi_upload_tokens"  # token -> {"entry_id": str, "expires": float}
+_RPI_UPLOAD_INSTALL_TOKEN_URL = "/api/ps4_goldhen/rpi/upload_install/{token}"
 
 
 def _now() -> float:
@@ -77,6 +84,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("rpi_tokens", {})  # token -> {"path": str, "filename": str, "expires": float}
+    g.setdefault(_RPI_UPLOAD_TOKENS_KEY, {})  # token -> {"entry_id": str, "expires": float}
     g.setdefault("rpi_cleanup_task", None)
     return root
 
@@ -142,11 +150,11 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
 
 async def _ps4_rpi_install(hass: HomeAssistant, ps4_host: str, ps4_port: int, pkg_url: str) -> dict[str, Any]:
     """
-    Call the PS4 Remote Package Installer-style endpoint on port 12800.
+    Call the PS4 Remote Package Installer endpoint on port 12800.
 
-    Expected interface:
+    Common API:
       POST http://<ps4>:<port>/api/install
-      JSON: {"type":"direct","packages":["http://.../file.pkg"]}
+      Body: {"type":"direct","packages":["http://.../file.pkg"]}
     """
     session = async_get_clientsession(hass)
     endpoint = f"http://{ps4_host}:{ps4_port}/api/install"
@@ -154,8 +162,18 @@ async def _ps4_rpi_install(hass: HomeAssistant, ps4_host: str, ps4_port: int, pk
 
     _LOGGER.info("RPI install: POST %s (pkg=%s)", endpoint, pkg_url)
 
+    # Some builds are slow to respond; also keep connect timeout short.
+    timeout = ClientTimeout(total=180, connect=5, sock_connect=5, sock_read=180)
+
     try:
-        async with session.post(endpoint, json=payload, timeout=20) as resp:
+        # Send raw JSON body for maximum compatibility with simple servers.
+        body = json.dumps(payload)
+        async with session.post(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        ) as resp:
             text = await resp.text()
             if resp.status >= 400:
                 raise HomeAssistantError(f"PS4 installer error {resp.status}: {text}")
@@ -209,6 +227,8 @@ async def _rpi_cleanup_loop(hass: HomeAssistant) -> None:
         try:
             await asyncio.sleep(60)
             g = _global(hass)
+
+            # Expire PKG download tokens (PS4 pulls these)
             tokens: dict[str, Any] = g["rpi_tokens"]
             now = _now()
             expired = [t for t, info in tokens.items() if info.get("expires", 0) <= now]
@@ -223,6 +243,13 @@ async def _rpi_cleanup_loop(hass: HomeAssistant) -> None:
                         _LOGGER.info("Deleted expired PKG temp file: %s", path)
                     except OSError:
                         _LOGGER.warning("Failed to delete expired temp file: %s", path)
+
+            # Expire upload tokens (panel uses these)
+            up = g[_RPI_UPLOAD_TOKENS_KEY]
+            expired_up = [t for t, info in up.items() if info.get("expires", 0) <= now]
+            for token in expired_up:
+                up.pop(token, None)
+
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001
@@ -283,6 +310,28 @@ async def ws_rpi_install_url(
         connection.send_error(msg["id"], "unknown_error", str(err))
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ps4_goldhen/rpi_begin_upload",
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_rpi_begin_upload(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    entry_id = msg["entry_id"]
+    root = _ensure_domain_root(hass)
+    if entry_id not in root:
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return
+
+    token = secrets.token_urlsafe(24)
+    g = _global(hass)
+    g[_RPI_UPLOAD_TOKENS_KEY][token] = {"entry_id": entry_id, "expires": _now() + _RPI_UPLOAD_TOKEN_TTL_SECONDS}
+    connection.send_result(msg["id"], {"token": token})
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PS4 GoldHEN integration from a config entry."""
     host = entry.data[CONF_PS4_HOST]
@@ -292,9 +341,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _poll_ftp() -> dict[str, Any]:
         try:
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
-            )
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -313,8 +360,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await coordinator.async_config_entry_first_refresh()
 
-    # IMPORTANT:
-    # websocket.py expects hass.data[DOMAIN][entry_id] to exist.
+    # IMPORTANT: websocket.py expects hass.data[DOMAIN][entry_id] to exist.
     root = _ensure_domain_root(hass)
     root[entry.entry_id] = {
         "coordinator": coordinator,
@@ -329,6 +375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
         websocket_api.async_register_command(hass, ws_rpi_install_url)
+        websocket_api.async_register_command(hass, ws_rpi_begin_upload)
         g["ws_registered"] = True
 
     # Panel + static JS once
@@ -384,6 +431,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # RPI upload/install + token download
     hass.http.register_view(PS4RpiUploadInstallView())
+    hass.http.register_view(PS4RpiUploadInstallTokenView())
     hass.http.register_view(PS4RpiPkgDownloadView())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -411,7 +459,6 @@ class PS4RpiUploadInstallView(HomeAssistantView):
         entry_id: str | None = None
         port: int | None = None
         uploaded_filename: str | None = None
-        tmp_path: str | None = None
 
         file_part = None
         while True:
@@ -451,7 +498,7 @@ class PS4RpiUploadInstallView(HomeAssistantView):
         try:
             with open(tmp_path, "wb") as fp:
                 while True:
-                    chunk = await file_part.read_chunk(size=1024 * 1024)  # 1 MiB
+                    chunk = await file_part.read_chunk(size=1024 * 1024)
                     if not chunk:
                         break
                     fp.write(chunk)
@@ -464,7 +511,8 @@ class PS4RpiUploadInstallView(HomeAssistantView):
                 "expires": _now() + _RPI_TOKEN_TTL_SECONDS,
             }
 
-            base = f"{request.scheme}://{request.host}"
+            # Force HTTP for PS4 compatibility (avoid HTTPS / cert issues).
+            base = f"http://{request.host}"
             download_url = f"{base}/api/ps4_goldhen/rpi/pkg/{token}/{uploaded_filename}"
 
             install_result = await _ps4_rpi_install(hass, ps4_host, ps4_port, download_url)
@@ -486,6 +534,112 @@ class PS4RpiUploadInstallView(HomeAssistantView):
             return web.json_response({"success": False, "error": str(err)}, status=500)
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Upload/install failed")
+            return web.json_response({"success": False, "error": str(err)}, status=500)
+
+
+class PS4RpiUploadInstallTokenView(HomeAssistantView):
+    """Unauthenticated upload endpoint secured by short-lived token + LAN-only remote IP."""
+
+    url = _RPI_UPLOAD_INSTALL_TOKEN_URL
+    name = "api:ps4_goldhen:rpi_upload_install_token"
+    requires_auth = False
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+
+        if not _is_private_remote(request):
+            return web.json_response({"success": False, "error": "Forbidden"}, status=403)
+
+        token = request.match_info.get("token", "")
+        g = _global(hass)
+        token_info = g[_RPI_UPLOAD_TOKENS_KEY].get(token)
+        if not token_info or token_info.get("expires", 0) <= _now():
+            g[_RPI_UPLOAD_TOKENS_KEY].pop(token, None)
+            return web.json_response({"success": False, "error": "Token expired"}, status=410)
+
+        entry_id = token_info["entry_id"]
+        # One-shot token
+        g[_RPI_UPLOAD_TOKENS_KEY].pop(token, None)
+
+        try:
+            request._client_max_size = _RPI_MAX_UPLOAD_BYTES  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+        reader = await request.multipart()
+
+        port: int | None = None
+        uploaded_filename: str | None = None
+        file_part = None
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "port":
+                raw = (await part.read(decode=True)).decode(errors="ignore").strip()
+                if raw:
+                    port = int(raw)
+            elif part.name == "file":
+                file_part = part
+                uploaded_filename = _safe_filename(part.filename or "upload.pkg")
+                break
+
+        if file_part is None or not uploaded_filename:
+            return web.json_response({"success": False, "error": "Missing file"}, status=400)
+
+        root = _ensure_domain_root(hass)
+        entry_data = root.get(entry_id)
+        if not entry_data:
+            return web.json_response({"success": False, "error": "Entry not found"}, status=404)
+
+        ps4_host = entry_data["host"]
+        ps4_port = int(port or entry_data.get("rpi_port", DEFAULT_RPI_PORT))
+
+        tmp_dir = hass.config.path(_RPI_TMP_DIR)
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        pkg_token = secrets.token_urlsafe(24)
+        tmp_path = os.path.join(tmp_dir, f"{pkg_token}__{uploaded_filename}")
+
+        size = 0
+        try:
+            with open(tmp_path, "wb") as fp:
+                while True:
+                    chunk = await file_part.read_chunk(size=1024 * 1024)
+                    if not chunk:
+                        break
+                    fp.write(chunk)
+                    size += len(chunk)
+
+            g2 = _global(hass)
+            g2["rpi_tokens"][pkg_token] = {
+                "path": tmp_path,
+                "filename": uploaded_filename,
+                "expires": _now() + _RPI_TOKEN_TTL_SECONDS,
+            }
+
+            base = f"http://{request.host}"
+            download_url = f"{base}/api/ps4_goldhen/rpi/pkg/{pkg_token}/{uploaded_filename}"
+
+            install_result = await _ps4_rpi_install(hass, ps4_host, ps4_port, download_url)
+
+            return web.json_response(
+                {
+                    "success": True,
+                    "entry_id": entry_id,
+                    "ps4_host": ps4_host,
+                    "ps4_port": ps4_port,
+                    "filename": uploaded_filename,
+                    "bytes_received": size,
+                    "download_url": download_url,
+                    "install_result": install_result,
+                }
+            )
+        except HomeAssistantError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=500)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Token upload/install failed")
             return web.json_response({"success": False, "error": str(err)}, status=500)
 
 
@@ -645,7 +799,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     root = _ensure_domain_root(hass)
     root.pop(entry.entry_id, None)
 
-    # If last entry removed, remove services + panel + cleanup task
     remaining = [k for k in root.keys() if k != "_global"]
     if not remaining:
         hass.services.async_remove(DOMAIN, _SVC_SEND_PAYLOAD)
