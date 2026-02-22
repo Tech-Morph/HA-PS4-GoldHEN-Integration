@@ -42,13 +42,12 @@ _SVC_SEND_PAYLOAD = "send_payload"
 # GLOBAL panel (single sidebar item)
 _PANEL_URL_PATH = "ps4_goldhen"
 _PANEL_SIDEBAR_TITLE = "PS4 GoldHEN"
-_PANEL_SIDEBAR_ICON = "mdi:playstation"
+_PANEL_SIDEBAR_ICON = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 _JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.0"
-
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 
 
@@ -156,7 +155,7 @@ async def ws_list_entries(hass: HomeAssistant, connection: websocket_api.ActiveC
 async def ws_list_payloads(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
     try:
         os.makedirs(PAYLOAD_DIR, exist_ok=True)
-        items = []
+        items: list[str] = []
         for name in sorted(os.listdir(PAYLOAD_DIR)):
             lower = name.lower()
             if lower.endswith(".bin") or lower.endswith(".elf"):
@@ -195,8 +194,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await coordinator.async_config_entry_first_refresh()
 
-    # IMPORTANT:
-    # websocket.py expects hass.data[DOMAIN][entry_id] to exist.
+    # IMPORTANT: websocket.py expects hass.data[DOMAIN][entry_id] to exist.
     root = _ensure_domain_root(hass)
     root[entry.entry_id] = {
         "coordinator": coordinator,
