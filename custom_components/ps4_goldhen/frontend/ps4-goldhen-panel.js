@@ -45,6 +45,17 @@ class PS4GoldHENPanel extends HTMLElement {
     this._klogLines = [];
     this._klogMaxLines = 800;
     this._klogUnsub = null; // unsubscribe fn returned by subscribeMessage
+    this._klogManuallyDisconnected = false;
+    this._klogRenderQueued = false;
+  }
+
+  connectedCallback() {
+    // no-op: we auto-connect when tab is opened
+  }
+
+  disconnectedCallback() {
+    // Ensure we always clean up the live subscription
+    this._klogDisconnect(false);
   }
 
   async _init() {
@@ -303,6 +314,38 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
+  // --- Klog helpers ---
+  _extractKlogLine(m) {
+    // Prefer HA websocket event envelope: { type:"event", event:{ line:"..." } }
+    const a = m?.event?.line;
+    if (typeof a === "string") return a;
+
+    // Fallback for direct payloads
+    const b = m?.line;
+    if (typeof b === "string") return b;
+
+    // Some implementations might send {event:{message:"..."}}
+    const c = m?.event?.message;
+    if (typeof c === "string") return c;
+
+    return null;
+  }
+
+  _scheduleKlogRender() {
+    if (this._klogRenderQueued) return;
+    this._klogRenderQueued = true;
+
+    requestAnimationFrame(() => {
+      this._klogRenderQueued = false;
+      const box = this.shadowRoot?.querySelector?.("#klog-box");
+      if (!box) return;
+
+      // Rebuild text (keeps max-lines simple + deterministic)
+      box.textContent = this._klogLines.join("\n");
+      box.scrollTop = box.scrollHeight;
+    });
+  }
+
   // Klog
   async _klogConnect() {
     if (!this._hass || !this._selectedEntryId) {
@@ -310,7 +353,10 @@ class PS4GoldHENPanel extends HTMLElement {
       return;
     }
 
-    const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || "3232").trim();
+    // If already connected, do nothing
+    if (this._klogUnsub) return;
+
+    const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || this._klogPort || "3232").trim();
     const port = parseInt(portStr, 10) || 3232;
     this._klogPort = String(port);
 
@@ -320,28 +366,21 @@ class PS4GoldHENPanel extends HTMLElement {
       return;
     }
 
-    // If already connected, do nothing
-    if (this._klogUnsub) return;
-
     this._klogStatus = `Connecting (port ${port})...`;
     this._render();
 
     try {
       this._klogUnsub = await this._hass.connection.subscribeMessage(
         (m) => {
-          const line = m?.event?.line;
-          if (typeof line !== "string") return;
+          const line = this._extractKlogLine(m);
+          if (typeof line !== "string" || !line.length) return;
 
           this._klogLines.push(line);
           if (this._klogLines.length > this._klogMaxLines) {
             this._klogLines.splice(0, this._klogLines.length - this._klogMaxLines);
           }
 
-          const box = this.shadowRoot.querySelector("#klog-box");
-          if (box) {
-            box.textContent = this._klogLines.join("\n");
-            box.scrollTop = box.scrollHeight;
-          }
+          this._scheduleKlogRender();
         },
         {
           type: "ps4_goldhen/klog_subscribe",
@@ -350,6 +389,7 @@ class PS4GoldHENPanel extends HTMLElement {
         }
       );
 
+      this._klogManuallyDisconnected = false;
       this._klogStatus = `Connected (port ${port}).`;
     } catch (e) {
       this._klogStatus = `Connect failed: ${e.message || e}`;
@@ -359,13 +399,15 @@ class PS4GoldHENPanel extends HTMLElement {
     this._render();
   }
 
-  _klogDisconnect() {
+  _klogDisconnect(markManual = true) {
     if (this._klogUnsub) {
       try {
         this._klogUnsub();
       } catch (_) {}
     }
     this._klogUnsub = null;
+
+    if (markManual) this._klogManuallyDisconnected = true;
     this._klogStatus = "Disconnected.";
     this._render();
   }
@@ -457,7 +499,8 @@ class PS4GoldHENPanel extends HTMLElement {
     if (sel) {
       sel.onchange = async () => {
         // Important: disconnect Klog when switching consoles
-        this._klogDisconnect();
+        this._klogDisconnect(false);
+        this._klogManuallyDisconnected = false;
 
         this._selectedEntryId = sel.value;
         this._editing = null;
@@ -488,7 +531,14 @@ class PS4GoldHENPanel extends HTMLElement {
 
     this.shadowRoot.querySelectorAll(".tabbtn").forEach((b) => {
       b.onclick = () => {
-        this._tab = b.dataset.tab;
+        const nextTab = b.dataset.tab;
+
+        // Disconnect live klog if you leave the tab (prevents background spam + stale DOM)
+        if (this._tab === "klog" && nextTab !== "klog") {
+          this._klogDisconnect(false);
+        }
+
+        this._tab = nextTab;
         this._render();
       };
     });
@@ -514,14 +564,20 @@ class PS4GoldHENPanel extends HTMLElement {
       const d = this.shadowRoot.querySelector("#btn-klog-disconnect");
       const clr = this.shadowRoot.querySelector("#btn-klog-clear");
       if (c) c.onclick = () => this._klogConnect();
-      if (d) d.onclick = () => this._klogDisconnect();
+      if (d) d.onclick = () => this._klogDisconnect(true);
       if (clr) clr.onclick = () => this._klogClear();
 
-      // populate box on render
+      // Populate box on render
       const box = this.shadowRoot.querySelector("#klog-box");
       if (box) {
         box.textContent = this._klogLines.join("\n");
         box.scrollTop = box.scrollHeight;
+      }
+
+      // Auto-connect when opening tab (unless user explicitly disconnected)
+      if (!this._klogUnsub && !this._klogManuallyDisconnected && this._selectedEntryId) {
+        // Run after this render finishes binding the DOM
+        setTimeout(() => this._klogConnect(), 0);
       }
     }
 
