@@ -1,10 +1,10 @@
-"""WebSocket API handlers for PS4 GoldHEN FTP file browser."""
+"""WebSocket API handlers for PS4 GoldHEN FTP file browser + Klog stream."""
 from __future__ import annotations
 
 import asyncio
 import ftplib
 import io
-import os
+from datetime import datetime, timezone
 from typing import Any
 
 import voluptuous as vol
@@ -12,10 +12,14 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DOMAIN, CONF_PS4_HOST, CONF_FTP_PORT, DEFAULT_FTP_PORT
+from .const import DOMAIN, DEFAULT_FTP_PORT
 
 # FTP timeout for all operations (seconds)
 _FTP_TIMEOUT = 15
+
+# GoldHEN Klog server default port (documented in GoldHEN changelog)
+DEFAULT_KLOG_PORT = 3232
+
 
 def _ftp_list_dir(host: str, port: int, path: str) -> list[dict[str, Any]]:
     """Blocking: list a directory via FTP. Returns list of entry dicts."""
@@ -48,6 +52,7 @@ def _ftp_list_dir(host: str, port: int, path: str) -> list[dict[str, Any]]:
     entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     return entries
 
+
 def _ftp_delete(host: str, port: int, path: str, is_dir: bool) -> None:
     """Blocking: delete a file or empty directory via FTP."""
     with ftplib.FTP() as ftp:
@@ -58,6 +63,7 @@ def _ftp_delete(host: str, port: int, path: str, is_dir: bool) -> None:
         else:
             ftp.delete(path)
 
+
 def _ftp_rename(host: str, port: int, from_path: str, to_path: str) -> None:
     """Blocking: rename/move a file or directory via FTP."""
     with ftplib.FTP() as ftp:
@@ -65,12 +71,14 @@ def _ftp_rename(host: str, port: int, from_path: str, to_path: str) -> None:
         ftp.login()
         ftp.rename(from_path, to_path)
 
+
 def _ftp_mkdir(host: str, port: int, path: str) -> None:
     """Blocking: create a directory via FTP."""
     with ftplib.FTP() as ftp:
         ftp.connect(host, port, timeout=_FTP_TIMEOUT)
         ftp.login()
         ftp.mkd(path)
+
 
 def _ftp_get_text(host: str, port: int, path: str) -> str:
     """Blocking: download a file and return as string."""
@@ -82,6 +90,7 @@ def _ftp_get_text(host: str, port: int, path: str) -> str:
     buffer.seek(0)
     return buffer.read().decode("utf-8", errors="replace")
 
+
 def _ftp_put_text(host: str, port: int, path: str, content: str) -> None:
     """Blocking: upload string content to a file."""
     buffer = io.BytesIO(content.encode("utf-8"))
@@ -90,21 +99,28 @@ def _ftp_put_text(host: str, port: int, path: str, content: str) -> None:
         ftp.login()
         ftp.storbinary(f"STOR {path}", buffer)
 
+
 def _safe_int(s: str) -> int:
     try:
         return int(s)
     except (ValueError, TypeError):
         return 0
 
+
 @callback
 def async_setup(hass: HomeAssistant) -> None:
-    """Register all WebSocket commands for the FTP file browser."""
+    """Register all WebSocket commands for the integration."""
+    # FTP
     websocket_api.async_register_command(hass, ws_list_dir)
     websocket_api.async_register_command(hass, ws_delete)
     websocket_api.async_register_command(hass, ws_rename)
     websocket_api.async_register_command(hass, ws_mkdir)
     websocket_api.async_register_command(hass, ws_get_text)
     websocket_api.async_register_command(hass, ws_put_text)
+
+    # Klog
+    websocket_api.async_register_command(hass, ws_klog_subscribe)
+
 
 # ── list directory ────────────────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -126,14 +142,13 @@ async def ws_list_dir(
     host, port = _get_ftp_params(hass, entry_id)
     try:
         loop = asyncio.get_running_loop()
-        entries = await loop.run_in_executor(
-            None, _ftp_list_dir, host, port, path
-        )
+        entries = await loop.run_in_executor(None, _ftp_list_dir, host, port, path)
         connection.send_result(msg["id"], {"path": path, "entries": entries})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 # ── delete ────────────────────────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -154,14 +169,13 @@ async def ws_delete(
     host, port = _get_ftp_params(hass, msg["entry_id"])
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, _ftp_delete, host, port, msg["path"], msg["is_dir"]
-        )
+        await loop.run_in_executor(None, _ftp_delete, host, port, msg["path"], msg["is_dir"])
         connection.send_result(msg["id"], {"success": True})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 # ── rename ────────────────────────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -182,14 +196,13 @@ async def ws_rename(
     host, port = _get_ftp_params(hass, msg["entry_id"])
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, _ftp_rename, host, port, msg["from_path"], msg["to_path"]
-        )
+        await loop.run_in_executor(None, _ftp_rename, host, port, msg["from_path"], msg["to_path"])
         connection.send_result(msg["id"], {"success": True})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 # ── mkdir ─────────────────────────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -209,14 +222,13 @@ async def ws_mkdir(
     host, port = _get_ftp_params(hass, msg["entry_id"])
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, _ftp_mkdir, host, port, msg["path"]
-        )
+        await loop.run_in_executor(None, _ftp_mkdir, host, port, msg["path"])
         connection.send_result(msg["id"], {"success": True})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 # ── get text content (Edit) ───────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -236,14 +248,13 @@ async def ws_get_text(
     host, port = _get_ftp_params(hass, msg["entry_id"])
     try:
         loop = asyncio.get_running_loop()
-        content = await loop.run_in_executor(
-            None, _ftp_get_text, host, port, msg["path"]
-        )
+        content = await loop.run_in_executor(None, _ftp_get_text, host, port, msg["path"])
         connection.send_result(msg["id"], {"content": content})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 # ── put text content (Save) ───────────────────────────────────────────────────
 @websocket_api.websocket_command(
@@ -264,17 +275,106 @@ async def ws_put_text(
     host, port = _get_ftp_params(hass, msg["entry_id"])
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, _ftp_put_text, host, port, msg["path"], msg["content"]
-        )
+        await loop.run_in_executor(None, _ftp_put_text, host, port, msg["path"], msg["content"])
         connection.send_result(msg["id"], {"success": True})
     except ftplib.all_errors as err:
         connection.send_error(msg["id"], "ftp_error", str(err))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "unknown_error", str(err))
 
+
+# ── Klog stream subscription ──────────────────────────────────────────────────
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ps4_goldhen/klog_subscribe",
+        vol.Required("entry_id"): str,
+        vol.Optional("port", default=DEFAULT_KLOG_PORT): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=65535)
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_klog_subscribe(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Subscribe to GoldHEN Klog TCP stream and forward lines to frontend."""
+    entry_id = msg["entry_id"]
+    port = int(msg.get("port", DEFAULT_KLOG_PORT))
+
+    try:
+        host = hass.data[DOMAIN][entry_id]["host"]
+    except Exception:  # noqa: BLE001
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return
+
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "connect_failed", f"Cannot connect to Klog at {host}:{port}: {err}")
+        return
+
+    async def _stream_task() -> None:
+        buf = b""
+        try:
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r")
+                    connection.send_message(
+                        {
+                            "id": msg["id"],
+                            "type": "event",
+                            "event": {
+                                "line": line,
+                                "time": datetime.now(timezone.utc).isoformat(),
+                            },
+                        }
+                    )
+        except asyncio.CancelledError:
+            # normal on unsubscribe
+            pass
+        except Exception as err:  # noqa: BLE001
+            connection.send_message(
+                {
+                    "id": msg["id"],
+                    "type": "event",
+                    "event": {
+                        "line": f"[klog] stream error: {err}",
+                        "time": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+            )
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
+    task = hass.async_create_task(_stream_task())
+
+    @callback
+    def _unsub() -> None:
+        task.cancel()
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Register unsubscribe handler for this subscription id
+    connection.subscriptions[msg["id"]] = _unsub
+
+    connection.send_result(msg["id"], {"connected": True, "host": host, "port": port})
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _get_ftp_params(hass: HomeAssistant, entry_id: str) -> tuple[str, int]:
     """Pull host + FTP port from stored entry data."""
     data = hass.data[DOMAIN][entry_id]
-    return data["host"], int(data["ftp_port"])
+    return data["host"], int(data.get("ftp_port", DEFAULT_FTP_PORT))
