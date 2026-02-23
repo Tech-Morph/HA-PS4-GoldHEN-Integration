@@ -1,33 +1,63 @@
-# Project / Roadmap — PS4 GoldHEN (Home Assistant)
+# HA-PS4-GoldHEN-Integration — Project
 
-This integration focuses on stable day-to-day tools for a GoldHEN-enabled PS4 inside Home Assistant.
+Home Assistant custom integration (HACS) to control and monitor a PS4 running GoldHEN network services.
 
-## Current scope
+## Goals
 
-- Sidebar dashboard panel:
-  - FTP browser/editor (browse, download, upload, rename, delete, edit text)
-  - BinLoader sender (send `.bin` / `.elf` payloads on demand)
-- HA service: `ps4_goldhen.send_payload`
-- FTP reachability sensor (polls FTP only)
+- Provide a clean Home Assistant sidebar panel for PS4 tools:
+  - FTP file browser (browse, upload, download, delete, rename, edit text).
+  - BinLoader payload sender (send .bin/.elf to port 9090).
+  - Live Klog viewer (stream PS4 kernel/app log output into the UI).
+- Keep everything local-first and LAN-friendly.
+- Avoid fragile “one-off” scripts by using HA-native services + websocket APIs.
 
-## Explicitly out of scope (for now)
+## Current Features
 
-- Remote PKG / Remote Package Installer support.
-  - Rationale: it adds security and reliability pitfalls (auth, large file handling, PS4 HTTP compatibility), and isn’t needed for the core goal of payload delivery + FTP management.
+### Sidebar panel UI
+- Tabs: FTP, BinLoader, Klog
+- PS4 selector (supports multiple configured consoles)
 
-## Planned / ideas
+### FTP
+- Websocket directory listing
+- Download via signed path (auth/sign_path)
+- Upload via authenticated POST
+- Text editor: read/write small text files over FTP
 
-- GoldHEN API sensors (if stable across versions):
-  - Console temperature / fan
-  - Current title / running app
-  - Free space info
-- Quality-of-life:
-  - Payload library management in the UI (upload payloads into `/config/ps4_payloads/`)
-  - Optional “favorites” payload list per PS4 entry
-- Diagnostics:
-  - Better error reporting for FTP failures and BinLoader connection issues
+### BinLoader
+- Payload listing from HA filesystem (payload directory returned by backend)
+- Service call to send payload over raw TCP to the PS4 BinLoader port
 
-## Notes
+### Klog
+- Subscribe UI to backend stream and append to in-panel log box
+- Auto-connect when opening the Klog tab, disconnect on tab-leave/entry-switch
 
-- BinLoader should not be polled; only connect when sending a payload.
-- For dashboard assets, keep the logo as a transparent PNG for best appearance.
+## Architecture Notes
+
+- Frontend: `custom_components/ps4_goldhen/frontend/ps4-goldhen-panel.js`
+- Backend:
+  - Websocket commands:
+    - `ps4_goldhen/list_entries`
+    - `ps4_goldhen/list_payloads`
+    - `ps4_goldhen/ftp_*` commands (list, delete, rename, get_text, put_text)
+    - `ps4_goldhen/klog_subscribe` (stream events)
+  - HTTP endpoints:
+    - `/api/ps4_goldhen/ftp/download`
+    - `/api/ps4_goldhen/ftp/upload`
+
+## Roadmap
+
+- Klog improvements:
+  - Add “tail N lines” on connect.
+  - Add filters (contains / regex).
+  - Add “copy”, “download log”, and “pause” buttons.
+- PKG workflows:
+  - Upload PKG to HA and deliver/install via chosen mechanism (TBD).
+- Better error reporting in UI:
+  - Connection diagnostics (ports reachable, service running, auth issues).
+- Unit/integration tests for websocket schemas and filesystem operations.
+
+## Development Workflow
+
+- Keep websocket message shapes stable (prefer HA `event` envelope for streams).
+- Ensure cleanup on unsubscribe/disconnect (avoid orphan tasks).
+- Prefer async I/O, and avoid blocking calls in the event loop.
