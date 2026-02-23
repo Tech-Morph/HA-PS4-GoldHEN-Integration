@@ -2,53 +2,80 @@
 
 ![version](https://img.shields.io/badge/version-0.8.2-blue)
 
-A [HACS](https://hacs.xyz) custom integration for Home Assistant that provides:
+A [HACS](https://hacs.xyz) + sidebar panel for managing a PS4 running GoldHEN network services.
 
-- A sidebar **dashboard panel** (FTP + BinLoader tools).
-- A service to send `.bin` / `.elf` payloads to GoldHEN BinLoader over TCP.
-- An FTP reachability sensor (safe periodic polling of FTP only).
+## What it does
 
----
+From Home Assistant, you get a PS4 sidebar panel with tabs:
 
-## Features
+- **FTP**
+  - Browse PS4 files/folders
+  - Upload/download files
+  - Rename/delete
+  - Edit text files (read/write)
 
-- **Sidebar dashboard** — appears in Home Assistant’s sidebar as “PS4 GoldHEN” with icon `mdi:sony-playstation`.
-- **BinLoader sender** — sends selected payloads to the configured PS4 BinLoader port (default 9090).
-- **FTP dashboard tools** — browse/list, download, upload, rename, delete, and edit text files via FTP.
-- **FTP connectivity sensor** — polls GoldHEN FTP (default 2121) every 30 seconds and reports reachable/unreachable.
+- **BinLoader**
+  - List payloads from the HA payload directory
+  - Send a payload to the PS4 BinLoader TCP port (commonly 9090)
 
-> BinLoader (9090) is intentionally not polled on a schedule — repeated probe connections can destabilize the GoldHEN BinLoader service. Payloads are only sent on demand.
-
----
+- **Klog**
+  - Display live PS4 log output in the UI
+  - Auto-connects when you open the Klog tab (you can still disconnect manually)
 
 ## Requirements
 
-| What | Detail |
-|------|--------|
-| PS4 firmware | GoldHEN installed and running |
-| BinLoader | enabled in GoldHEN, listening on port **9090** (configurable) |
-| FTP | GoldHEN FTP enabled on port **2121** (configurable) |
-| Payload files | `.bin` / `.elf` placed in `/config/ps4_payloads/` on the HA host |
+- A PS4 on your LAN.
+- GoldHEN running and its network services enabled (FTP/BinLoader/Klog as applicable).
+- Home Assistant with HACS installed.
 
----
+## Installation (HACS)
 
-## Install via HACS (Custom Repository)
+1. Add this repository to HACS as a Custom Repository (Integration).
+2. Install the integration.
+3. Restart Home Assistant.
+4. Add/configure the integration in the UI.
 
-1. Install HACS if you haven’t already: https://hacs.xyz
-2. In Home Assistant: **HACS → Integrations**
-3. Open the menu (⋮) → **Custom repositories**
-4. Add this repository URL:
+## Configuration
 
-   `https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration`
+Configure your PS4 host/IP and ports in the integration config flow.
 
-5. Set **Category** to **Integration**
-6. Click **Add**
-7. Find “PS4 GoldHEN — Home Assistant Integration” in HACS and click **Download**
-8. Restart Home Assistant
-9. Go to **Settings → Devices & Services → Add Integration → “PS4 GoldHEN”**
-10. Enter:
-    - PS4 IP / Host
-    - BinLoader port (default 9090)
-    - FTP port (default 2121)
+Typical ports (may vary by your setup):
+- FTP: 2121
+- BinLoader: 9090
+- Klog: 3232
 
----
+## Usage
+
+### Sidebar panel
+Open the sidebar entry for the integration.
+
+- Select your PS4 from the dropdown.
+- Use:
+  - FTP tab to browse/upload/edit.
+  - BinLoader tab to send payloads.
+  - Klog tab to see live logs.
+
+### Klog notes
+
+The PS4 Klog stream is typically “single-client” style.
+This integration is designed so the UI subscribes to the integration (HA websocket),
+not directly to the PS4, so you can keep recording logs while still viewing them.
+
+If you see logs in `nc` but not in the UI:
+- Make sure the integration backend is actually emitting websocket events for `ps4_goldhen/klog_subscribe`.
+- Ensure no other part of your setup is consuming the only available klog connection.
+
+## Troubleshooting
+
+- If FTP listing works but uploads fail:
+  - Check HA auth/session and verify the `/api/ps4_goldhen/ftp/upload` endpoint returns 200.
+- If BinLoader “Send” says success but nothing happens:
+  - Confirm PS4 host/port and that BinLoader is enabled.
+- If Klog connects but box stays empty:
+  - Confirm the backend is sending messages shaped like:
+    - `{ type: "event", event: { line: "..." } }`
+    - (the panel also accepts `{ line: "..." }` as a fallback)
+
+## Contributing
+
+PRs welcome. Please keep websocket schemas consistent and ensure all subscriptions clean up correctly.
