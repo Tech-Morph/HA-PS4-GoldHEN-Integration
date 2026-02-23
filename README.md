@@ -1,6 +1,6 @@
 # PS4 GoldHEN — Home Assistant Integration
 
-![version](https://img.shields.io/badge/version-0.8.2-blue)
+![version](https://img.shields.io/badge/version-0.8.3-blue)
 
 A [HACS](https://hacs.xyz) + sidebar panel for managing a PS4 running GoldHEN network services.
 
