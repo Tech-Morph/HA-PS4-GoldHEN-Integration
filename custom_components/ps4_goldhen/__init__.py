@@ -47,7 +47,8 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.1"
+# Bump this when you change the panel JS so browsers pick it up.
+_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.2"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 
 
@@ -202,10 +203,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ftp_port": ftp_port,
     }
 
+    # Register integration WS commands once globally (FTP + Klog are registered in websocket.py async_setup)
     g = _global(hass)
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
         websocket_api.async_register_command(hass, ws_list_payloads)
+
+        from .websocket import async_setup as async_setup_websocket
+
+        async_setup_websocket(hass)
+
         g["ws_registered"] = True
 
     await _register_frontend_and_panel_once(hass)
@@ -231,10 +238,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
         hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
-
-    from .websocket import async_setup as async_setup_websocket
-
-    async_setup_websocket(hass)
 
     hass.http.register_view(PS4FTPDownloadView())
     hass.http.register_view(PS4FTPUploadView())
