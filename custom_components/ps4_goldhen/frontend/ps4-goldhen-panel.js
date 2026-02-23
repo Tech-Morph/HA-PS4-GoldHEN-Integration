@@ -38,6 +38,13 @@ class PS4GoldHENPanel extends HTMLElement {
     this._binPort = "";
     this._binTimeout = "30";
     this._binStatus = "";
+
+    // Klog state
+    this._klogPort = "3232";
+    this._klogStatus = "";
+    this._klogLines = [];
+    this._klogMaxLines = 800;
+    this._klogUnsub = null; // unsubscribe fn returned by subscribeMessage
   }
 
   async _init() {
@@ -77,7 +84,7 @@ class PS4GoldHENPanel extends HTMLElement {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
   }
 
-  // Signed paths are ideal for GET downloads; uploads should use authenticated fetch. [web:38][web:202]
+  // Signed paths are ideal for GET downloads; uploads should use authenticated fetch.
   async _signedPath(path) {
     const resp = await this._hass.callWS({ type: "auth/sign_path", path });
     return resp.path;
@@ -92,7 +99,6 @@ class PS4GoldHENPanel extends HTMLElement {
     if (this._hass && typeof this._hass.fetchWithAuth === "function") {
       return this._hass.fetchWithAuth(path, options);
     }
-    // Fallback: try normal fetch with cookies (may still fail depending on auth setup)
     return fetch(path, { credentials: "same-origin", ...options });
   }
 
@@ -244,7 +250,6 @@ class PS4GoldHENPanel extends HTMLElement {
     formData.append("file", file);
 
     try {
-      // Use authenticated fetch for POST uploads. [web:202]
       const response = await this._authFetch("/api/ps4_goldhen/ftp/upload", {
         method: "POST",
         body: formData,
@@ -298,6 +303,79 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
+  // Klog
+  async _klogConnect() {
+    if (!this._hass || !this._selectedEntryId) {
+      alert("Select a PS4 first.");
+      return;
+    }
+
+    const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || "3232").trim();
+    const port = parseInt(portStr, 10) || 3232;
+    this._klogPort = String(port);
+
+    if (!this._hass.connection || typeof this._hass.connection.subscribeMessage !== "function") {
+      this._klogStatus = "Klog subscribeMessage not available in this HA frontend context.";
+      this._render();
+      return;
+    }
+
+    // If already connected, do nothing
+    if (this._klogUnsub) return;
+
+    this._klogStatus = `Connecting (port ${port})...`;
+    this._render();
+
+    try {
+      this._klogUnsub = await this._hass.connection.subscribeMessage(
+        (m) => {
+          const line = m?.event?.line;
+          if (typeof line !== "string") return;
+
+          this._klogLines.push(line);
+          if (this._klogLines.length > this._klogMaxLines) {
+            this._klogLines.splice(0, this._klogLines.length - this._klogMaxLines);
+          }
+
+          const box = this.shadowRoot.querySelector("#klog-box");
+          if (box) {
+            box.textContent = this._klogLines.join("\n");
+            box.scrollTop = box.scrollHeight;
+          }
+        },
+        {
+          type: "ps4_goldhen/klog_subscribe",
+          entry_id: this._selectedEntryId,
+          port: port,
+        }
+      );
+
+      this._klogStatus = `Connected (port ${port}).`;
+    } catch (e) {
+      this._klogStatus = `Connect failed: ${e.message || e}`;
+      this._klogUnsub = null;
+    }
+
+    this._render();
+  }
+
+  _klogDisconnect() {
+    if (this._klogUnsub) {
+      try {
+        this._klogUnsub();
+      } catch (_) {}
+    }
+    this._klogUnsub = null;
+    this._klogStatus = "Disconnected.";
+    this._render();
+  }
+
+  _klogClear() {
+    this._klogLines = [];
+    const box = this.shadowRoot.querySelector("#klog-box");
+    if (box) box.textContent = "";
+  }
+
   _render() {
     const entry = this._selectedEntry();
     const entryLabel = entry ? `${entry.title || entry.ps4_host} (${entry.ps4_host})` : "No PS4 configured";
@@ -336,6 +414,8 @@ class PS4GoldHENPanel extends HTMLElement {
         .editor-actions { margin-top:16px; display:flex; justify-content:flex-end; gap:12px; }
         .editor-actions button { padding:8px 20px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); cursor:pointer; }
         .btn-save { background:var(--primary-color)!important; color:#fff!important; border:none!important; }
+
+        pre.klog { margin-top:10px; height:45vh; overflow:auto; padding:10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--secondary-background-color); white-space:pre-wrap; }
       </style>
 
       <div class="topbar">
@@ -361,12 +441,14 @@ class PS4GoldHENPanel extends HTMLElement {
       <div class="tabs">
         <button class="tabbtn ${this._tab === "ftp" ? "active" : ""}" data-tab="ftp">FTP</button>
         <button class="tabbtn ${this._tab === "binloader" ? "active" : ""}" data-tab="binloader">BinLoader</button>
+        <button class="tabbtn ${this._tab === "klog" ? "active" : ""}" data-tab="klog">Klog</button>
       </div>
 
       ${this._loading ? `<div class="loading">Processing...</div>` : ""}
 
       ${this._tab === "ftp" ? this._renderFtp() : ""}
       ${this._tab === "binloader" ? this._renderBinLoader() : ""}
+      ${this._tab === "klog" ? this._renderKlog() : ""}
 
       ${this._editing ? this._renderEditor() : ""}
     `;
@@ -374,6 +456,9 @@ class PS4GoldHENPanel extends HTMLElement {
     const sel = this.shadowRoot.querySelector("#entry-select");
     if (sel) {
       sel.onchange = async () => {
+        // Important: disconnect Klog when switching consoles
+        this._klogDisconnect();
+
         this._selectedEntryId = sel.value;
         this._editing = null;
         this._path = "/";
@@ -421,6 +506,22 @@ class PS4GoldHENPanel extends HTMLElement {
           await this._loadPayloads();
           this._setLoading(false);
         };
+      }
+    }
+
+    if (this._tab === "klog") {
+      const c = this.shadowRoot.querySelector("#btn-klog-connect");
+      const d = this.shadowRoot.querySelector("#btn-klog-disconnect");
+      const clr = this.shadowRoot.querySelector("#btn-klog-clear");
+      if (c) c.onclick = () => this._klogConnect();
+      if (d) d.onclick = () => this._klogDisconnect();
+      if (clr) clr.onclick = () => this._klogClear();
+
+      // populate box on render
+      const box = this.shadowRoot.querySelector("#klog-box");
+      if (box) {
+        box.textContent = this._klogLines.join("\n");
+        box.scrollTop = box.scrollHeight;
       }
     }
 
@@ -498,6 +599,23 @@ class PS4GoldHENPanel extends HTMLElement {
       </div>
 
       ${this._binStatus ? `<div class="card"><h3>Status</h3><div>${this._binStatus}</div></div>` : ""}
+    `;
+  }
+
+  _renderKlog() {
+    const connected = !!this._klogUnsub;
+    return html`
+      <div class="card">
+        <h3>Live Klog</h3>
+        <div class="row">
+          <input id="klog-port" type="number" value="${this._klogPort}" style="width:160px;">
+          <button class="btn" id="btn-klog-connect" ${connected ? "disabled" : ""}>Connect</button>
+          <button class="btn" id="btn-klog-disconnect" ${connected ? "" : "disabled"}>Disconnect</button>
+          <button class="btn" id="btn-klog-clear">Clear</button>
+        </div>
+        <div class="muted">${this._klogStatus || "Waiting... (default port 3232)"}</div>
+        <pre class="klog" id="klog-box"></pre>
+      </div>
     `;
   }
 
