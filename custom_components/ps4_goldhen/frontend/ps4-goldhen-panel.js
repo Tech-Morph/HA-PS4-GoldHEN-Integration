@@ -792,7 +792,7 @@ class PS4GoldHENPanel extends HTMLElement {
                         <div class="payload-name">${p}</div>
                         <div class="payload-sendrow">
                           <span class="muted">Send</span>
-                          <span class="pill">Bin</span>
+                          <span class="pill">BIN/ELF</span>
                         </div>
                       </button>
                     </div>
