@@ -323,6 +323,8 @@ class PS4GoldHENPanel extends HTMLElement {
       "ftp": "ftp.png",
       "history-blocker": "history-blocker.png",
       "kernel-dumper": "kernel-dumper.png",
+      "kernel-clock": "kernel-clock.png",
+      "linux-1gb": "Linux-1gb.png",
       "linux-2gb": "Linux-2gb.png",
       "linux-3gb": "Linux-3gb.png",
       "linux-4gb": "Linux-4gb.png",
@@ -332,6 +334,11 @@ class PS4GoldHENPanel extends HTMLElement {
       "rif-renamer": "rif-renamer.png",
       "todex": "todex.png",
       "app-dumper": "app-dumper.png",
+      "app2usb": "app2usb.png",
+      "ps4-sflash0-dumper": "ps4-sflash0-dumper.png",
+      "pup-decrypt": "pup-decrypt.png",
+      "restore": "restore.png",
+       "webrte": "WebRTE.png",
     };
 
     const iconFile = map[key];
