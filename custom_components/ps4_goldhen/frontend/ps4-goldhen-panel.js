@@ -338,7 +338,7 @@ class PS4GoldHENPanel extends HTMLElement {
       "ps4-sflash0-dumper": "ps4-sflash0-dumper.png",
       "pup-decrypt": "pup-decrypt.png",
       "restore": "restore.png",
-       "webrte": "WebRTE.png",
+      "webrte": "WebRTE.png",
     };
 
     const iconFile = map[key];
