@@ -48,8 +48,10 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 # Bump this when you change the panel JS so browsers pick it up.
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.8.2"
+_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.9.0"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
+# Directory of payload icons (jpg/png/etc)
+_PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -82,6 +84,12 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
                 StaticPathConfig(
                     _LOGO_STATIC_URL,
                     hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"),
+                    False,
+                ),
+                # Serve the entire payload_icons directory
+                StaticPathConfig(
+                    _PAYLOAD_ICONS_STATIC_URL,
+                    hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons"),
                     False,
                 ),
             ]
