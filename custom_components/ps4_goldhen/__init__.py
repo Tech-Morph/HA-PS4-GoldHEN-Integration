@@ -5,7 +5,9 @@ import asyncio
 import io
 import logging
 import os
+import shutil
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -48,10 +50,12 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 # Bump this when you change the panel JS so browsers pick it up.
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.9.0"
+_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.9.2"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
-# Directory of payload icons (jpg/png/etc)
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
+
+# Bundled payloads shipped with the integration (optional)
+_BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -62,6 +66,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("panel_registered", False)
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
+    g.setdefault("bundled_payloads_installed", False)
     return root
 
 
@@ -70,10 +75,41 @@ def _global(hass: HomeAssistant) -> dict[str, Any]:
     return root["_global"]
 
 
+def _copy_bundled_payloads_to_config() -> int:
+    """Copy bundled payloads shipped with the integration into /config/ps4_payloads (no overwrite)."""
+    src_dir = Path(__file__).parent / _BUNDLED_PAYLOADS_DIRNAME
+    dst_dir = Path(PAYLOAD_DIR)
+
+    if not src_dir.exists() or not src_dir.is_dir():
+        return 0
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for p in sorted(src_dir.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".bin", ".elf"):
+            continue
+
+        dst = dst_dir / p.name
+        if dst.exists():
+            continue
+
+        shutil.copy2(str(p), str(dst))
+        copied += 1
+
+    return copied
+
+
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
     g = _global(hass)
 
     if not g["frontend_registered"]:
+        # Ensure directories exist (helps avoid static-path issues if folder missing)
+        payload_icons_dir = hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons")
+        os.makedirs(payload_icons_dir, exist_ok=True)
+
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(
@@ -86,10 +122,9 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
                     hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"),
                     False,
                 ),
-                # Serve the entire payload_icons directory
                 StaticPathConfig(
                     _PAYLOAD_ICONS_STATIC_URL,
-                    hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons"),
+                    payload_icons_dir,
                     False,
                 ),
             ]
@@ -224,6 +259,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         g["ws_registered"] = True
 
     await _register_frontend_and_panel_once(hass)
+
+    # Install bundled payloads once (optional)
+    if not g.get("bundled_payloads_installed", False):
+        copied = await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
+        if copied:
+            _LOGGER.info("Installed %d bundled payload(s) into %s", copied, PAYLOAD_DIR)
+        g["bundled_payloads_installed"] = True
 
     _SEND_PAYLOAD_SCHEMA = vol.Schema(
         {
