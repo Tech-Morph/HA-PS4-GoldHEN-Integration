@@ -32,12 +32,14 @@ class PS4GoldHENPanel extends HTMLElement {
 
     // BinLoader state
     this._payloads = [];
-    this._selectedPayload = "";
     this._payloadDir = "";
     this._binHost = "";
     this._binPort = "";
     this._binTimeout = "30";
     this._binStatus = "";
+    this._payloadFilter = "";
+    this._payloadAutoRefreshMs = 5000;
+    this._payloadRefreshTimer = null;
 
     // Klog state
     this._klogPort = "3232";
@@ -47,15 +49,16 @@ class PS4GoldHENPanel extends HTMLElement {
     this._klogUnsub = null; // unsubscribe fn returned by subscribeMessage
     this._klogManuallyDisconnected = false;
     this._klogRenderQueued = false;
+
+    // Icons for payloads
+    this._payloadIconBaseUrl = "/api/ps4_goldhen/frontend/payload_icons";
   }
 
-  connectedCallback() {
-    // no-op: we auto-connect when tab is opened
-  }
+  connectedCallback() {}
 
   disconnectedCallback() {
-    // Ensure we always clean up the live subscription
     this._klogDisconnect(false);
+    this._stopPayloadAutoRefresh();
   }
 
   async _init() {
@@ -117,16 +120,37 @@ class PS4GoldHENPanel extends HTMLElement {
     if (!this._hass) return;
     try {
       const resp = await this._hass.callWS({ type: "ps4_goldhen/list_payloads" });
-      this._payloads = resp.payloads || [];
+      const next = resp.payloads || [];
       this._payloadDir = resp.payload_dir || "";
-      if (!this._selectedPayload && this._payloads.length) {
-        this._selectedPayload = this._payloads[0];
+
+      // Only re-render if list actually changes (keeps UI smoother on auto-refresh)
+      const a = JSON.stringify(this._payloads);
+      const b = JSON.stringify(next);
+      this._payloads = next;
+
+      if (a !== b && this._tab === "binloader") {
+        this._render();
       }
     } catch (e) {
       this._payloads = [];
       this._payloadDir = "";
-      this._selectedPayload = "";
       this._binStatus = `Failed to list payloads: ${e.message || e}`;
+    }
+  }
+
+  _startPayloadAutoRefresh() {
+    if (this._payloadRefreshTimer) return;
+    this._payloadRefreshTimer = window.setInterval(() => {
+      if (this._tab !== "binloader") return;
+      if (this._loading) return;
+      this._loadPayloads();
+    }, this._payloadAutoRefreshMs);
+  }
+
+  _stopPayloadAutoRefresh() {
+    if (this._payloadRefreshTimer) {
+      clearInterval(this._payloadRefreshTimer);
+      this._payloadRefreshTimer = null;
     }
   }
 
@@ -274,28 +298,89 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
+  // --- Payload icons ---
+  _normalizePayloadKey(name) {
+    const base = String(name || "").replace(/\.[^/.]+$/, ""); // strip extension
+    return base
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
+  }
+
+  _payloadIconUrl(payloadName) {
+    const key = this._normalizePayloadKey(payloadName);
+
+    // Map normalized payload key -> icon filename (you add these files)
+    const map = {
+      "disable-aslr": "disable-aslr.jpg",
+      "exit-idu": "exit-idu.jpg",
+      "backup": "backup.jpg",
+      "disable-updates": "disable-updates.jpg",
+      "enable-browser": "enable-browser.jpg",
+      "enable-updates": "enable-updates.jpg",
+      "fan-threshold": "fan-threshold.jpg",
+      "ftp": "ftp.jpg",
+      "history-blocker": "history-blocker.jpg",
+      "kernel-dumper": "kernel-dumper.jpg",
+      "linux-2gb": "Linux-2gb.jpg",
+      "linux-3gb": "Linux-3gb.jpg",
+      "linux-4gb": "Linux-4gb.jpg",
+      "module-dumper": "module-dumper.jpg",
+      "ps4-debug-v1-1-16": "ps4-debug_v1.1.16.jpg",
+      "permanent-uart": "permanent-uart.jpg",
+      "rif-renamer": "rif-renamer.jpg",
+      "todex": "todex.jpg",
+      "app-dumper": "app-dumper.jpg",
+    };
+
+    const iconFile = map[key];
+
+    // Fallback to GoldHEN logo if we don't have an icon for the payload
+    if (!iconFile) return "/api/ps4_goldhen/frontend/goldhen_logo.png";
+
+    // Add a tiny cache-bust so icon updates show quickly if you replace files
+    return `${this._payloadIconBaseUrl}/${iconFile}?v=1`;
+  }
+
   // BinLoader
-  async _sendPayload() {
+  async _sendPayload(payloadOverride = null) {
     const entry = this._selectedEntry();
     if (!entry) {
       alert("Select a PS4 first.");
       return;
     }
-    const payload = (this.shadowRoot.querySelector("#payload-select")?.value || "").trim();
+
+    const payload = (payloadOverride || "").trim();
     if (!payload) {
       alert("Select a payload first.");
       return;
     }
 
-    const host = (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() || entry.ps4_host;
+    // Prefer live input values, fall back to stored state, then entry defaults
+    const host =
+      (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() ||
+      this._binHost ||
+      entry.ps4_host;
+
     const port = parseInt(
-      (this.shadowRoot.querySelector("#bin-port")?.value || "").trim() || entry.binloader_port,
+      (this.shadowRoot.querySelector("#bin-port")?.value || "").trim() ||
+        this._binPort ||
+        entry.binloader_port,
       10
     );
-    const timeout = parseFloat((this.shadowRoot.querySelector("#bin-timeout")?.value || "30").trim());
+
+    const timeout = parseFloat(
+      (this.shadowRoot.querySelector("#bin-timeout")?.value || "").trim() || this._binTimeout || "30"
+    );
+
+    // Persist what user typed (so it doesn't reset on re-render)
+    this._binHost = host;
+    this._binPort = String(port || "");
+    this._binTimeout = String(timeout || "");
 
     this._setLoading(true);
-    this._binStatus = "Sending payload...";
+    this._binStatus = `Sending ${payload}...`;
     this._render();
 
     try {
@@ -305,7 +390,7 @@ class PS4GoldHENPanel extends HTMLElement {
         binloader_port: port,
         timeout: timeout,
       });
-      this._binStatus = "Payload sent successfully.";
+      this._binStatus = `Payload sent: ${payload}`;
     } catch (e) {
       this._binStatus = `Send failed: ${e.message || e}`;
       alert(this._binStatus);
@@ -316,15 +401,12 @@ class PS4GoldHENPanel extends HTMLElement {
 
   // --- Klog helpers ---
   _extractKlogLine(m) {
-    // Prefer HA websocket event envelope: { type:"event", event:{ line:"..." } }
     const a = m?.event?.line;
     if (typeof a === "string") return a;
 
-    // Fallback for direct payloads
     const b = m?.line;
     if (typeof b === "string") return b;
 
-    // Some implementations might send {event:{message:"..."}}
     const c = m?.event?.message;
     if (typeof c === "string") return c;
 
@@ -340,7 +422,6 @@ class PS4GoldHENPanel extends HTMLElement {
       const box = this.shadowRoot?.querySelector?.("#klog-box");
       if (!box) return;
 
-      // Rebuild text (keeps max-lines simple + deterministic)
       box.textContent = this._klogLines.join("\n");
       box.scrollTop = box.scrollHeight;
     });
@@ -353,7 +434,6 @@ class PS4GoldHENPanel extends HTMLElement {
       return;
     }
 
-    // If already connected, do nothing
     if (this._klogUnsub) return;
 
     const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || this._klogPort || "3232").trim();
@@ -428,7 +508,7 @@ class PS4GoldHENPanel extends HTMLElement {
         .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding-bottom:12px; border-bottom:1px solid var(--divider-color); margin-bottom:12px; }
         .logo { height:44px; width:auto; display:block; }
         .picker { display:flex; gap:8px; align-items:center; background:var(--secondary-background-color); padding:8px 10px; border-radius:6px; flex-wrap:wrap; }
-        select, input[type="text"], input[type="number"] { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); }
+        select, input[type="text"], input[type="number"], input[type="search"] { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); }
         .tabs { display:flex; gap:8px; margin:12px 0 16px 0; flex-wrap:wrap; }
         .tabbtn { cursor:pointer; padding:8px 12px; border-radius:999px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); }
         .tabbtn.active { border-color:var(--primary-color); box-shadow:0 0 0 2px rgba(3,169,244,0.25); }
@@ -458,6 +538,18 @@ class PS4GoldHENPanel extends HTMLElement {
         .btn-save { background:var(--primary-color)!important; color:#fff!important; border:none!important; }
 
         pre.klog { margin-top:10px; height:45vh; overflow:auto; padding:10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--secondary-background-color); white-space:pre-wrap; }
+
+        /* Payload grid */
+        .payload-toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+        .payload-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap:10px; margin-top:12px; }
+        .payload-card { border:1px solid var(--divider-color); border-radius:10px; overflow:hidden; background:var(--card-background-color); }
+        .payload-btn { width:100%; padding:0; border:none; background:transparent; color:inherit; cursor:pointer; display:flex; flex-direction:column; align-items:stretch; }
+        .payload-btn:hover { background:var(--secondary-background-color); }
+        .payload-imgwrap { width:100%; aspect-ratio: 1 / 1; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.06); }
+        .payload-imgwrap img { width:100%; height:100%; object-fit:cover; display:block; }
+        .payload-name { padding:8px 10px; font-size:13px; line-height:1.2; word-break:break-word; }
+        .payload-sendrow { padding:8px 10px; border-top:1px solid var(--divider-color); display:flex; justify-content:space-between; align-items:center; gap:8px; }
+        .pill { font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid var(--divider-color); background:var(--secondary-background-color); }
       </style>
 
       <div class="topbar">
@@ -482,7 +574,7 @@ class PS4GoldHENPanel extends HTMLElement {
 
       <div class="tabs">
         <button class="tabbtn ${this._tab === "ftp" ? "active" : ""}" data-tab="ftp">FTP</button>
-        <button class="tabbtn ${this._tab === "binloader" ? "active" : ""}" data-tab="binloader">BinLoader</button>
+        <button class="tabbtn ${this._tab === "binloader" ? "active" : ""}" data-tab="binloader">Payloads</button>
         <button class="tabbtn ${this._tab === "klog" ? "active" : ""}" data-tab="klog">Klog</button>
       </div>
 
@@ -498,7 +590,6 @@ class PS4GoldHENPanel extends HTMLElement {
     const sel = this.shadowRoot.querySelector("#entry-select");
     if (sel) {
       sel.onchange = async () => {
-        // Important: disconnect Klog when switching consoles
         this._klogDisconnect(false);
         this._klogManuallyDisconnected = false;
 
@@ -509,8 +600,9 @@ class PS4GoldHENPanel extends HTMLElement {
 
         const entry = this._selectedEntry();
         if (entry) {
-          this._binHost = entry.ps4_host || "";
-          this._binPort = String(entry.binloader_port ?? "");
+          // Only set defaults if user hasn't typed overrides
+          if (!this._binHost) this._binHost = entry.ps4_host || "";
+          if (!this._binPort) this._binPort = String(entry.binloader_port ?? "");
         }
 
         await this._loadDir("/");
@@ -533,9 +625,12 @@ class PS4GoldHENPanel extends HTMLElement {
       b.onclick = () => {
         const nextTab = b.dataset.tab;
 
-        // Disconnect live klog if you leave the tab (prevents background spam + stale DOM)
         if (this._tab === "klog" && nextTab !== "klog") {
           this._klogDisconnect(false);
+        }
+
+        if (this._tab === "binloader" && nextTab !== "binloader") {
+          this._stopPayloadAutoRefresh();
         }
 
         this._tab = nextTab;
@@ -546,8 +641,7 @@ class PS4GoldHENPanel extends HTMLElement {
     if (this._tab === "ftp") this._bindFtpEvents();
 
     if (this._tab === "binloader") {
-      const btn = this.shadowRoot.querySelector("#btn-send-payload");
-      if (btn) btn.onclick = () => this._sendPayload();
+      this._startPayloadAutoRefresh();
 
       const refreshPayloads = this.shadowRoot.querySelector("#btn-refresh-payloads");
       if (refreshPayloads) {
@@ -555,6 +649,32 @@ class PS4GoldHENPanel extends HTMLElement {
           this._setLoading(true);
           await this._loadPayloads();
           this._setLoading(false);
+          this._render();
+        };
+      }
+
+      const host = this.shadowRoot.querySelector("#bin-host");
+      const port = this.shadowRoot.querySelector("#bin-port");
+      const timeout = this.shadowRoot.querySelector("#bin-timeout");
+      const filter = this.shadowRoot.querySelector("#payload-filter");
+
+      if (host) host.oninput = () => (this._binHost = host.value);
+      if (port) port.oninput = () => (this._binPort = port.value);
+      if (timeout) timeout.oninput = () => (this._binTimeout = timeout.value);
+      if (filter) {
+        filter.oninput = () => {
+          this._payloadFilter = filter.value || "";
+          this._render();
+        };
+      }
+
+      const grid = this.shadowRoot.querySelector("#payload-grid");
+      if (grid) {
+        grid.onclick = (ev) => {
+          const btn = ev.target.closest("button[data-payload]");
+          if (!btn) return;
+          const payload = btn.dataset.payload;
+          this._sendPayload(payload);
         };
       }
     }
@@ -567,16 +687,13 @@ class PS4GoldHENPanel extends HTMLElement {
       if (d) d.onclick = () => this._klogDisconnect(true);
       if (clr) clr.onclick = () => this._klogClear();
 
-      // Populate box on render
       const box = this.shadowRoot.querySelector("#klog-box");
       if (box) {
         box.textContent = this._klogLines.join("\n");
         box.scrollTop = box.scrollHeight;
       }
 
-      // Auto-connect when opening tab (unless user explicitly disconnected)
       if (!this._klogUnsub && !this._klogManuallyDisconnected && this._selectedEntryId) {
-        // Run after this render finishes binding the DOM
         setTimeout(() => this._klogConnect(), 0);
       }
     }
@@ -633,24 +750,56 @@ class PS4GoldHENPanel extends HTMLElement {
   }
 
   _renderBinLoader() {
+    const entry = this._selectedEntry();
+    const shownHost = this._binHost || entry?.ps4_host || "";
+    const shownPort = this._binPort || String(entry?.binloader_port ?? "");
+    const shownTimeout = this._binTimeout || "30";
+
+    const filter = (this._payloadFilter || "").trim().toLowerCase();
+    const payloads = (this._payloads || []).filter((p) => {
+      if (!filter) return true;
+      return String(p).toLowerCase().includes(filter);
+    });
+
     return html`
       <div class="card">
-        <h3>Send payload</h3>
-        <div class="row">
-          <select id="payload-select" style="min-width:320px;">
-            ${this._payloads.map(p => {
-              const sel = p === this._selectedPayload ? "selected" : "";
-              return `<option value="${p}" ${sel}>${p}</option>`;
-            }).join("")}
-          </select>
-          <button class="btn" id="btn-refresh-payloads">Refresh payload list</button>
+        <h3>Payloads (click an icon to send)</h3>
+
+        <div class="payload-toolbar">
+          <input id="bin-host" type="text" placeholder="PS4 Host" value="${shownHost}" style="min-width:240px;">
+          <input id="bin-port" type="number" placeholder="Port" value="${shownPort}" style="width:160px;">
+          <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="${shownTimeout}" style="width:160px;">
+          <button class="btn" id="btn-refresh-payloads">Refresh</button>
+          <input id="payload-filter" type="search" placeholder="Filter payloads..." value="${this._payloadFilter || ""}" style="min-width:220px;">
+          <span class="pill">Auto-refresh: ${Math.round(this._payloadAutoRefreshMs / 1000)}s</span>
         </div>
-        <div class="muted">Payload directory on HA: ${this._payloadDir || "(unknown)"}</div>
-        <div class="row" style="margin-top:10px;">
-          <input id="bin-host" type="text" placeholder="PS4 Host" value="${this._binHost}" style="min-width:240px;">
-          <input id="bin-port" type="number" placeholder="Port" value="${this._binPort}" style="width:160px;">
-          <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="30" style="width:160px;">
-          <button class="btn" id="btn-send-payload">Send</button>
+
+        <div class="muted" style="margin-top:8px;">
+          Payload directory on HA: ${this._payloadDir || "(unknown)"}
+        </div>
+
+        <div id="payload-grid" class="payload-grid">
+          ${payloads.length
+            ? payloads
+                .map((p) => {
+                  const icon = this._payloadIconUrl(p);
+                  return `
+                    <div class="payload-card">
+                      <button class="payload-btn" data-payload="${p}">
+                        <div class="payload-imgwrap">
+                          <img src="${icon}" alt="${p}">
+                        </div>
+                        <div class="payload-name">${p}</div>
+                        <div class="payload-sendrow">
+                          <span class="muted">Send</span>
+                          <span class="pill">Bin</span>
+                        </div>
+                      </button>
+                    </div>
+                  `;
+                })
+                .join("")
+            : `<div class="muted">No payloads found. Put .bin/.elf files in the payload folder, then hit Refresh.</div>`}
         </div>
       </div>
 
