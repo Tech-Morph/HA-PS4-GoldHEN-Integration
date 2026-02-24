@@ -200,12 +200,22 @@ async def ws_list_payloads(hass: HomeAssistant, connection: websocket_api.Active
     try:
         os.makedirs(PAYLOAD_DIR, exist_ok=True)
         items: list[str] = []
+
+        # Hide these from the UI (case-insensitive)
+        hidden = {"linux.bin"}
+
         for name in sorted(os.listdir(PAYLOAD_DIR)):
             lower = name.lower()
+
+            # Hide Linux.bin but keep Linux-1gb.bin, Linux-2gb.bin, etc.
+            if lower in hidden:
+                continue
+
             if lower.endswith(".bin") or lower.endswith(".elf"):
                 full = os.path.join(PAYLOAD_DIR, name)
                 if os.path.isfile(full):
                     items.append(name)
+
         connection.send_result(msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR})
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "list_error", str(err))
