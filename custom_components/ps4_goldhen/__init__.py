@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -102,13 +103,37 @@ def _copy_bundled_payloads_to_config() -> int:
     return copied
 
 
+def _list_payloads_blocking(payload_dir: str) -> list[str]:
+    """Blocking payload directory scan (run in executor)."""
+    p = Path(payload_dir)
+    p.mkdir(parents=True, exist_ok=True)
+
+    items: list[str] = []
+    hidden = {"linux.bin"}  # case-insensitive
+
+    # Match prior behavior: sort by file name (case-sensitive)
+    for entry in sorted(p.iterdir(), key=lambda e: e.name):
+        name = entry.name
+        lower = name.lower()
+
+        # Hide Linux.bin but keep Linux-1gb.bin, Linux-2gb.bin, etc.
+        if lower in hidden:
+            continue
+
+        if lower.endswith(".bin") or lower.endswith(".elf"):
+            if entry.is_file():
+                items.append(name)
+
+    return items
+
+
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
     g = _global(hass)
 
     if not g["frontend_registered"]:
         # Ensure directories exist (helps avoid static-path issues if folder missing)
         payload_icons_dir = hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons")
-        os.makedirs(payload_icons_dir, exist_ok=True)
+        await hass.async_add_executor_job(partial(os.makedirs, payload_icons_dir, exist_ok=True))
 
         await hass.http.async_register_static_paths(
             [
@@ -149,10 +174,20 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
 
 async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
     """Stream a local .bin/.elf file to host:port over a raw TCP connection."""
-    if not os.path.isfile(filepath):
-        raise HomeAssistantError(f"Payload file not found: {filepath}")
+    loop = asyncio.get_running_loop()
 
-    file_size = os.path.getsize(filepath)
+    def _read_payload() -> tuple[bytes, int]:
+        with open(filepath, "rb") as f:
+            data = f.read()
+        return data, len(data)
+
+    try:
+        data, file_size = await loop.run_in_executor(None, _read_payload)
+    except FileNotFoundError as err:
+        raise HomeAssistantError(f"Payload file not found: {filepath}") from err
+    except OSError as err:
+        raise HomeAssistantError(f"Cannot read payload file {filepath}: {err}") from err
+
     _LOGGER.info("Sending payload %s (%d bytes) to %s:%d", os.path.basename(filepath), file_size, host, port)
 
     try:
@@ -161,8 +196,6 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
         raise HomeAssistantError(f"Cannot reach BinLoader at {host}:{port}: {err}") from err
 
     try:
-        loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, lambda: open(filepath, "rb").read())
         writer.write(data)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
     finally:
@@ -198,24 +231,7 @@ async def ws_list_entries(hass: HomeAssistant, connection: websocket_api.ActiveC
 @websocket_api.async_response
 async def ws_list_payloads(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
     try:
-        os.makedirs(PAYLOAD_DIR, exist_ok=True)
-        items: list[str] = []
-
-        # Hide these from the UI (case-insensitive)
-        hidden = {"linux.bin"}
-
-        for name in sorted(os.listdir(PAYLOAD_DIR)):
-            lower = name.lower()
-
-            # Hide Linux.bin but keep Linux-1gb.bin, Linux-2gb.bin, etc.
-            if lower in hidden:
-                continue
-
-            if lower.endswith(".bin") or lower.endswith(".elf"):
-                full = os.path.join(PAYLOAD_DIR, name)
-                if os.path.isfile(full):
-                    items.append(name)
-
+        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
         connection.send_result(msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR})
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "list_error", str(err))
@@ -292,7 +308,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         t_port = int(call.data.get("binloader_port") or binloader_port)
         timeout = float(call.data.get("timeout", 30))
 
-        os.makedirs(PAYLOAD_DIR, exist_ok=True)
+        await hass.async_add_executor_job(partial(os.makedirs, PAYLOAD_DIR, exist_ok=True))
         filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
         await _send_bin_tcp(t_host, t_port, filepath, timeout)
 
