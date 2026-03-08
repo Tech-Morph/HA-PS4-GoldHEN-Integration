@@ -378,5 +378,4 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store for klog-parsed sensor data
     root[entry.entry_id]["klog_data"] = {
         SENSOR_CURRENT_GAME: "Unknown",
-        SENSOR_CPU_TEMP: None,
-        SENSOR_RSX_
+        SENSOR
