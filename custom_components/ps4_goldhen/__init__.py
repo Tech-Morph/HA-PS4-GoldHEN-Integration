@@ -53,10 +53,10 @@ _PANEL_SIDEBAR_ICON  = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT  = "ps4-goldhen-panel"
 
 # Frontend static paths (served by HA)
-_JS_STATIC_URL          = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
+_JS_STATIC_URL            = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 # Bump version to force browser cache refresh
-_JS_MODULE_URL          = f"{_JS_STATIC_URL}?v=1.0.0"
-_LOGO_STATIC_URL        = "/api/ps4_goldhen/frontend/goldhen_logo.png"
+_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=1.0.0"
+_LOGO_STATIC_URL          = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
 # Bundled payloads shipped with the integration
@@ -128,12 +128,16 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
         await hass.http.async_register_static_paths([
             StaticPathConfig(
                 _JS_STATIC_URL,
-                hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
+                hass.config.path(
+                    f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"
+                ),
                 False,
             ),
             StaticPathConfig(
                 _LOGO_STATIC_URL,
-                hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"),
+                hass.config.path(
+                    f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"
+                ),
                 False,
             ),
             StaticPathConfig(_PAYLOAD_ICONS_STATIC_URL, payload_icons_dir, False),
@@ -172,7 +176,7 @@ async def _send_bin_tcp(
         "Sending payload %s to %s:%d", os.path.basename(filepath), host, port
     )
     try:
-        reader, writer = await asyncio.wait_for(
+        _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
         )
         writer.write(data)
@@ -201,7 +205,6 @@ async def ws_list_entries(
             "ps4_host":       entry.data.get(CONF_PS4_HOST),
             "ftp_port":       entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
             "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
-            # ── newly exposed so the frontend panel can connect to klog/RPI ──
             "klog_port":      entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT),
             "rpi_port":       entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT),
         }
@@ -229,12 +232,11 @@ async def ws_list_payloads(
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    host            = entry.data[CONF_PS4_HOST]
-    binloader_port  = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
-    ftp_port        = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
-    # ── pull rpi_port and klog_port from config entry (with sane defaults) ──
-    rpi_port        = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
-    klog_port       = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
+    host           = entry.data[CONF_PS4_HOST]
+    binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
+    ftp_port       = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
+    rpi_port       = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
+    klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
     async def _poll_ftp() -> dict[str, Any]:
         try:
@@ -263,7 +265,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "host":           host,
         "binloader_port": binloader_port,
         "ftp_port":       ftp_port,
-        # ── store rpi_port and klog_port so websocket handlers can access them ──
         "rpi_port":       rpi_port,
         "klog_port":      klog_port,
     }
@@ -286,4 +287,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         vol.Required("payload_file"): str,
         vol.Optional("ps4_host"): str,
         vol.Optional("binloader_port"): vol.All(
-            vol.Coerce(int),
+            vol.Coerce(int), vol.Range(min=1024, max=65535)
+        ),
+        vol.Optional("timeout", default=30): vol.All(
+            vol.Coerce(float), vol.Range(min=1)
+        ),
+    })
+
+    async def handle_send_payload(call: ServiceCall) -> None:
+        p_file = call.data["payload_file"]
+        t_host = call.data.get("ps4_host") or host
+        t_port = int(call.data.get("binloader_port") or binloader_port)
+        filepath = (
+            p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
+        )
+        await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
+
+    if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
+        hass.services.async_register(
+            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
+            schema=_SEND_PAYLOAD_SCHEMA,
+        )
+
+    hass.http.register_view(PS4FTPDownloadView())
+    hass.http.register_view(PS4FTPUploadView())
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    return True
+
+
+class PS4FTPDownloadView(HomeAssistantView):
+    url          = "/api/ps4_goldhen/ftp/download"
+    name         = "api:ps4_goldhen:ftp_download"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        import ftplib
+        entry_id = request.query.get("entry_id")
+        path     = request.query.get("path")
+        if not entry_id or not path:
+            return web.Response(text="Missing entry_id or path", status=400)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
