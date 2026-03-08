@@ -50,14 +50,13 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
 # Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-# Bump this when you change the panel JS so browsers pick it up.
-_JS_MODULE_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js?v=0.9.2"
+# Bump version to force browser cache refresh
+_JS_MODULE_URL = f"{_JS_STATIC_URL}?v=1.0.0"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
-# Bundled payloads shipped with the integration (optional)
+# Bundled payloads shipped with the integration
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
-
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     hass.data.setdefault(DOMAIN, {})
@@ -70,92 +69,53 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("bundled_payloads_installed", False)
     return root
 
-
 def _global(hass: HomeAssistant) -> dict[str, Any]:
     root = _ensure_domain_root(hass)
     return root["_global"]
 
-
 def _copy_bundled_payloads_to_config() -> int:
-    """Copy bundled payloads shipped with the integration into /config/ps4_payloads (no overwrite)."""
+    """Copy bundled payloads shipped with the integration into /config/ps4_payloads."""
     src_dir = Path(__file__).parent / _BUNDLED_PAYLOADS_DIRNAME
     dst_dir = Path(PAYLOAD_DIR)
-
     if not src_dir.exists() or not src_dir.is_dir():
         return 0
-
     dst_dir.mkdir(parents=True, exist_ok=True)
-
     copied = 0
     for p in sorted(src_dir.iterdir()):
-        if not p.is_file():
+        if not p.is_file() or p.suffix.lower() not in (".bin", ".elf"):
             continue
-        if p.suffix.lower() not in (".bin", ".elf"):
-            continue
-
         dst = dst_dir / p.name
         if dst.exists():
             continue
-
         shutil.copy2(str(p), str(dst))
         copied += 1
-
     return copied
 
-
 def _list_payloads_blocking(payload_dir: str) -> list[str]:
-    """Blocking payload directory scan (run in executor)."""
+    """Blocking payload directory scan."""
     p = Path(payload_dir)
     p.mkdir(parents=True, exist_ok=True)
-
     items: list[str] = []
-    hidden = {"linux.bin"}  # case-insensitive
-
-    # Match prior behavior: sort by file name (case-sensitive)
+    hidden = {"linux.bin"}
     for entry in sorted(p.iterdir(), key=lambda e: e.name):
         name = entry.name
-        lower = name.lower()
-
-        # Hide Linux.bin but keep Linux-1gb.bin, Linux-2gb.bin, etc.
-        if lower in hidden:
+        if name.lower() in hidden:
             continue
-
-        if lower.endswith(".bin") or lower.endswith(".elf"):
-            if entry.is_file():
-                items.append(name)
-
+        if entry.is_file() and (name.lower().endswith(".bin") or name.lower().endswith(".elf")):
+            items.append(name)
     return items
-
 
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
     g = _global(hass)
-
     if not g["frontend_registered"]:
-        # Ensure directories exist (helps avoid static-path issues if folder missing)
         payload_icons_dir = hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons")
         await hass.async_add_executor_job(partial(os.makedirs, payload_icons_dir, exist_ok=True))
-
-        await hass.http.async_register_static_paths(
-            [
-                StaticPathConfig(
-                    _JS_STATIC_URL,
-                    hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
-                    False,
-                ),
-                StaticPathConfig(
-                    _LOGO_STATIC_URL,
-                    hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"),
-                    False,
-                ),
-                StaticPathConfig(
-                    _PAYLOAD_ICONS_STATIC_URL,
-                    payload_icons_dir,
-                    False,
-                ),
-            ]
-        )
+        await hass.http.async_register_static_paths([
+            StaticPathConfig(_JS_STATIC_URL, hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"), False),
+            StaticPathConfig(_LOGO_STATIC_URL, hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"), False),
+            StaticPathConfig(_PAYLOAD_ICONS_STATIC_URL, payload_icons_dir, False),
+        ])
         g["frontend_registered"] = True
-        _LOGGER.debug("Registered static frontend paths")
 
     if not g["panel_registered"]:
         await panel_custom.async_register_panel(
@@ -169,63 +129,38 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
             require_admin=False,
         )
         g["panel_registered"] = True
-        _LOGGER.info("Registered global panel: %s", _PANEL_URL_PATH)
-
 
 async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
-    """Stream a local .bin/.elf file to host:port over a raw TCP connection."""
+    """Stream a local payload file to host:port."""
     loop = asyncio.get_running_loop()
-
-    def _read_payload() -> tuple[bytes, int]:
-        with open(filepath, "rb") as f:
-            data = f.read()
-        return data, len(data)
-
     try:
-        data, file_size = await loop.run_in_executor(None, _read_payload)
-    except FileNotFoundError as err:
-        raise HomeAssistantError(f"Payload file not found: {filepath}") from err
-    except OSError as err:
+        data = await loop.run_in_executor(None, lambda: open(filepath, "rb").read())
+    except Exception as err:
         raise HomeAssistantError(f"Cannot read payload file {filepath}: {err}") from err
 
-    _LOGGER.info("Sending payload %s (%d bytes) to %s:%d", os.path.basename(filepath), file_size, host, port)
-
+    _LOGGER.info("Sending payload %s to %s:%d", os.path.basename(filepath), host, port)
     try:
-        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-    except (asyncio.TimeoutError, OSError) as err:
-        raise HomeAssistantError(f"Cannot reach BinLoader at {host}:{port}: {err}") from err
-
-    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
         writer.write(data)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
-    finally:
         writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
-
-    _LOGGER.info("Payload sent successfully.")
-
+        await writer.wait_closed()
+        _LOGGER.info("Payload sent successfully.")
+    except Exception as err:
+        raise HomeAssistantError(f"Connection to PS4 BinLoader failed: {err}") from err
 
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
 @websocket_api.async_response
 async def ws_list_entries(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
     entries = hass.config_entries.async_entries(DOMAIN)
-    out: list[dict[str, Any]] = []
-    for entry in entries:
-        host = entry.data.get(CONF_PS4_HOST, "")
-        out.append(
-            {
-                "entry_id": entry.entry_id,
-                "title": entry.title,
-                "ps4_host": host,
-                "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
-                "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
-            }
-        )
+    out = [{
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "ps4_host": entry.data.get(CONF_PS4_HOST),
+        "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
+        "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
+    } for entry in entries]
     connection.send_result(msg["id"], {"entries": out})
-
 
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_payloads"})
 @websocket_api.async_response
@@ -233,34 +168,26 @@ async def ws_list_payloads(hass: HomeAssistant, connection: websocket_api.Active
     try:
         items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
         connection.send_result(msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR})
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         connection.send_error(msg["id"], "list_error", str(err))
 
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up PS4 GoldHEN integration from a config entry."""
     host = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
     ftp_port = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
 
     async def _poll_ftp() -> dict[str, Any]:
         try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT)
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT)
             writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:  # noqa: BLE001
-                pass
+            await writer.wait_closed()
             return {"ftp_reachable": True}
-        except Exception:  # noqa: BLE001
+        except Exception:
             return {"ftp_reachable": False}
 
     coordinator = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name=f"{DOMAIN}_{host}",
-        update_method=_poll_ftp,
-        update_interval=_FTP_POLL_INTERVAL,
+        hass, _LOGGER, name=f"{DOMAIN}_{host}", 
+        update_method=_poll_ftp, update_interval=_FTP_POLL_INTERVAL
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -272,45 +199,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ftp_port": ftp_port,
     }
 
-    # Register integration WS commands once globally (FTP + Klog are registered in websocket.py async_setup)
     g = _global(hass)
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
         websocket_api.async_register_command(hass, ws_list_payloads)
-
         from .websocket import async_setup as async_setup_websocket
-
         async_setup_websocket(hass)
-
         g["ws_registered"] = True
 
     await _register_frontend_and_panel_once(hass)
 
-    # Install bundled payloads once (optional)
-    if not g.get("bundled_payloads_installed", False):
-        copied = await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
-        if copied:
-            _LOGGER.info("Installed %d bundled payload(s) into %s", copied, PAYLOAD_DIR)
+    if not g.get("bundled_payloads_installed"):
+        await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
         g["bundled_payloads_installed"] = True
 
-    _SEND_PAYLOAD_SCHEMA = vol.Schema(
-        {
-            vol.Required("payload_file"): str,
-            vol.Optional("ps4_host"): str,
-            vol.Optional("binloader_port"): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
-            vol.Optional("timeout", default=30): vol.All(vol.Coerce(float), vol.Range(min=1)),
-        }
-    )
+    _SEND_PAYLOAD_SCHEMA = vol.Schema({
+        vol.Required("payload_file"): str,
+        vol.Optional("ps4_host"): str,
+        vol.Optional("binloader_port"): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
+        vol.Optional("timeout", default=30): vol.All(vol.Coerce(float), vol.Range(min=1)),
+    })
 
     async def handle_send_payload(call: ServiceCall) -> None:
         p_file = call.data["payload_file"]
         t_host = call.data.get("ps4_host") or host
         t_port = int(call.data.get("binloader_port") or binloader_port)
-        timeout = float(call.data.get("timeout", 30))
-
-        await hass.async_add_executor_job(partial(os.makedirs, PAYLOAD_DIR, exist_ok=True))
         filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
-        await _send_bin_tcp(t_host, t_port, filepath, timeout)
+        await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
         hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
@@ -322,130 +237,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
-
 class PS4FTPDownloadView(HomeAssistantView):
-    """View to download/view files from PS4 via FTP."""
-
-    url = "/api/ps4_goldhen/ftp/download"
-    name = "api:ps4_goldhen:ftp_download"
-    requires_auth = True
-
+    url, name, requires_auth = "/api/ps4_goldhen/ftp/download", "api:ps4_goldhen:ftp_download", True
     async def get(self, request: web.Request) -> web.Response:
         import ftplib
-
-        hass = request.app["hass"]
-        entry_id = request.query.get("entry_id")
-        path = request.query.get("path")
-
-        if not entry_id or not path:
-            return web.Response(text="Missing entry_id or path", status=400)
-
-        root = _ensure_domain_root(hass)
-        data = root.get(entry_id)
-        if not data:
-            return web.Response(text="Entry not found", status=404)
-
-        host = data["host"]
-        port = int(data.get("ftp_port", DEFAULT_FTP_PORT))
-
-        def _get_file() -> bytes:
+        entry_id, path = request.query.get("entry_id"), request.query.get("path")
+        if not entry_id or not path: return web.Response(text="Missing entry_id or path", status=400)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data: return web.Response(text="Entry not found", status=404)
+        def _get_file():
             buffer = io.BytesIO()
             with ftplib.FTP() as ftp:
-                ftp.connect(host, port, timeout=15)
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
                 ftp.retrbinary(f"RETR {path}", buffer.write)
-                buffer.seek(0)
-                return buffer.read()
-
+            return buffer.getvalue()
         try:
-            content = await hass.async_add_executor_job(_get_file)
-            filename = os.path.basename(path)
-            return web.Response(
-                body=content,
-                content_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-            )
-        except Exception as err:
-            return web.Response(text=f"FTP Error: {err}", status=500)
-
+            content = await request.app["hass"].async_add_executor_job(_get_file)
+            return web.Response(body=content, content_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'})
+        except Exception as err: return web.Response(text=f"FTP Error: {err}", status=500)
 
 class PS4FTPUploadView(HomeAssistantView):
-    """View to upload files to PS4 via FTP."""
-
-    url = "/api/ps4_goldhen/ftp/upload"
-    name = "api:ps4_goldhen:ftp_upload"
-    requires_auth = True
-
+    url, name, requires_auth = "/api/ps4_goldhen/ftp/upload", "api:ps4_goldhen:ftp_upload", True
     async def post(self, request: web.Request) -> web.Response:
         import ftplib
-
-        hass = request.app["hass"]
-
         reader = await request.multipart()
-        entry_id = None
-        path = None
-        file_field = None
-
+        entry_id, path, file_field = None, None, None
         while True:
             part = await reader.next()
-            if part is None:
-                break
-            if part.name == "entry_id":
-                entry_id = (await part.read(decode=True)).decode()
-            elif part.name == "path":
-                path = (await part.read(decode=True)).decode()
-            elif part.name == "file":
-                file_field = part
-                break
-
-        if not all([entry_id, path, file_field]):
-            return web.Response(text="Missing entry_id, path, or file", status=400)
-
-        root = _ensure_domain_root(hass)
-        data = root.get(entry_id)
-        if not data:
-            return web.Response(text="Entry not found", status=404)
-
-        host = data["host"]
-        port = int(data.get("ftp_port", DEFAULT_FTP_PORT))
-        filename = file_field.filename
-        full_dest_path = (path.rstrip("/") + "/" + filename).replace("//", "/")
-
-        def _upload_file(file_data: bytes) -> None:
+            if part is None: break
+            if part.name == "entry_id": entry_id = (await part.read(decode=True)).decode()
+            elif part.name == "path": path = (await part.read(decode=True)).decode()
+            elif part.name == "file": file_field = part; break
+        if not all([entry_id, path, file_field]): return web.Response(text="Missing data", status=400)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data: return web.Response(text="Entry not found", status=404)
+        full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
+        def _upload_file(content):
             with ftplib.FTP() as ftp:
-                ftp.connect(host, port, timeout=15)
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
-                ftp.storbinary(f"STOR {full_dest_path}", io.BytesIO(file_data))
-
+                ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
         try:
-            content = await file_field.read(decode=True)
-            await hass.async_add_executor_job(_upload_file, content)
-            return web.json_response({"success": True, "path": full_dest_path})
-        except Exception as err:
-            return web.Response(text=f"FTP Upload Error: {err}", status=500)
-
+            await request.app["hass"].async_add_executor_job(_upload_file, await file_field.read(decode=True))
+            return web.json_response({"success": True, "path": full_dest})
+        except Exception as err: return web.Response(text=f"FTP Upload Error: {err}", status=500)
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if not unload_ok:
-        return False
-
-    root = _ensure_domain_root(hass)
-    root.pop(entry.entry_id, None)
-
-    remaining = [k for k in root.keys() if k != "_global"]
-    if not remaining:
-        hass.services.async_remove(DOMAIN, _SVC_SEND_PAYLOAD)
-
-        try:
-            frontend.async_remove_panel(hass, _PANEL_URL_PATH)
-        except Exception:  # noqa: BLE001
-            pass
-
-        hass.data.pop(DOMAIN, None)
-
-    return True
+    if unload_ok:
+        _ensure_domain_root(hass).pop(entry.entry_id, None)
+    return unload_ok
