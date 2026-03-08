@@ -268,7 +268,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "rpi_port":       rpi_port,
         "klog_port":      klog_port,
     }
-
+    # Store for klog-parsed sensor data
+    root[entry.entry_id]["klog_data"] = {
+        "current_game": "Unknown",
+        "cpu_temp": None,
+        "rsx_temp": None,
+    }
     g = _global(hass)
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
