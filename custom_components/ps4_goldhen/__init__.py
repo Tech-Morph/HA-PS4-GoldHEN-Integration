@@ -329,3 +329,80 @@ class PS4FTPDownloadView(HomeAssistantView):
         if not entry_id or not path:
             return web.Response(text="Missing entry_id or path", status=400)
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+
+        def _get_file():
+            buffer = io.BytesIO()
+            with ftplib.FTP() as ftp:
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.login()
+                ftp.retrbinary(f"RETR {path}", buffer.write)
+            return buffer.getvalue()
+
+        try:
+            content = await request.app["hass"].async_add_executor_job(_get_file)
+            return web.Response(
+                body=content,
+                content_type="application/octet-stream",
+                headers={
+                    "Content-Disposition":
+                        f'attachment; filename="{os.path.basename(path)}"'
+                },
+            )
+        except Exception as err:
+            return web.Response(text=f"FTP Error: {err}", status=500)
+
+
+class PS4FTPUploadView(HomeAssistantView):
+    url           = "/api/ps4_goldhen/ftp/upload"
+    name          = "api:ps4_goldhen:ftp_upload"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        import ftplib
+        reader = await request.multipart()
+        entry_id, path, file_field = None, None, None
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "entry_id":
+                entry_id = (await part.read(decode=True)).decode()
+            elif part.name == "path":
+                path = (await part.read(decode=True)).decode()
+            elif part.name == "file":
+                file_field = part
+                break
+        if not all([entry_id, path, file_field]):
+            return web.Response(text="Missing data", status=400)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+        full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
+
+        def _upload_file(content):
+            with ftplib.FTP() as ftp:
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.login()
+                ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
+
+        try:
+            await request.app["hass"].async_add_executor_job(
+                _upload_file, await file_field.read(decode=True)
+            )
+            return web.json_response({"success": True, "path": full_dest})
+        except Exception as err:
+            return web.Response(text=f"FTP Upload Error: {err}", status=500)
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        _ensure_domain_root(hass).pop(entry.entry_id, None)
+    return unload_ok
+
