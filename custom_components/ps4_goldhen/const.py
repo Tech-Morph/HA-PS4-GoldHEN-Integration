@@ -23,4 +23,9 @@ PAYLOAD_DIR = "/config/ps4_payloads"
 TCP_PROBE_TIMEOUT = 3.0
 
 # — Platforms ———————————————————————————————————————————————————————————————
-PLATFORMS: list[str] = ["sensor"]
+PLATFORMS: list[str] = ["sensor", "button"]
+
+# — Sensor data keys (from klog parsing) ——
+SENSOR_CURRENT_GAME = "current_game"
+SENSOR_CPU_TEMP = "cpu_temp"
+SENSOR_RSX_TEMP = "rsx_temp"
