@@ -1,9 +1,10 @@
+"""PS4 GoldHEN sensors: FTP status, current game, CPU/RSX temps from klog."""
 from __future__ import annotations
-
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -11,10 +12,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     CONF_PS4_HOST,
-    CONF_BINLOADER_PORT,
-    CONF_FTP_PORT,
-    DEFAULT_BINLOADER_PORT,
-    DEFAULT_FTP_PORT,
+    SENSOR_CURRENT_GAME,
+    SENSOR_CPU_TEMP,
+    SENSOR_RSX_TEMP,
 )
 
 
@@ -23,63 +23,88 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create the sensors for this config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities(
-        [
-            PS4FTPSensor(coordinator, entry),
-        ]
-    )
+    async_add_entities([
+        PS4FTPStatusSensor(coordinator, entry),
+        PS4CurrentGameSensor(coordinator, entry),
+        PS4CPUTempSensor(coordinator, entry),
+        PS4RSXTempSensor(coordinator, entry),
+    ])
 
 
-class PS4FTPSensor(CoordinatorEntity, SensorEntity):
-    """
-    Sensor: GoldHEN FTP reachability.
-
-    Reports "online" when a TCP connection to the FTP port (default 2121)
-    succeeds, and "offline" otherwise.
-
-    NOTE: BinLoader (9090) is intentionally NOT probed on a schedule because
-    repeated connections can destabilise the GoldHEN BinLoader service.
-    Payloads are only sent on demand via the ps4_goldhen.send_payload service.
-    """
-
+class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
+    """FTP reachability sensor."""
     _attr_has_entity_name = True
     _attr_icon = "mdi:sony-playstation"
 
-    def __init__(
-        self,
-        coordinator,
-        entry: ConfigEntry,
-    ) -> None:
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
         host = entry.data[CONF_PS4_HOST]
-        # Unique ID ensures this sensor survives restarts and re-imports
-        self._attr_unique_id = f"{DOMAIN}_{host}_ftp"
-        self._attr_name = "GoldHEN FTP"
+        self._attr_unique_id = f"{DOMAIN}_{host}_ftp_status"
+        self._attr_name = "FTP Status"
 
     @property
     def native_value(self) -> str:
-        """Return 'online' or 'offline' based on the FTP TCP probe."""
         data = self.coordinator.data or {}
         return "online" if data.get("ftp_reachable") else "offline"
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose connection details as attributes."""
-        entry_data = self._entry.data
-        return {
-            "ps4_host": entry_data.get(CONF_PS4_HOST),
-            "ftp_port": entry_data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
-            "binloader_port": entry_data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
-            "note": (
-                "BinLoader port is not polled on a schedule; "
-                "use ps4_goldhen.send_payload to send payloads on demand."
-            ),
-        }
+
+class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
+    """Current game title sensor (parsed from klog)."""
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:gamepad-variant"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        host = entry.data[CONF_PS4_HOST]
+        self._attr_unique_id = f"{DOMAIN}_{host}_current_game"
+        self._attr_name = "Current Game"
 
     @property
-    def available(self) -> bool:
-        """Sensor is always available as long as HA can run the coordinator."""
-        return self.coordinator.last_update_success
+    def native_value(self) -> str | None:
+        data = self.coordinator.data or {}
+        return data.get(SENSOR_CURRENT_GAME, "Unknown")
+
+
+class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
+    """CPU temperature sensor (parsed from klog)."""
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        host = entry.data[CONF_PS4_HOST]
+        self._attr_unique_id = f"{DOMAIN}_{host}_cpu_temp"
+        self._attr_name = "CPU Temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        temp = data.get(SENSOR_CPU_TEMP)
+        return float(temp) if temp is not None else None
+
+
+class PS4RSXTempSensor(CoordinatorEntity, SensorEntity):
+    """RSX (GPU) temperature sensor (parsed from klog)."""
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        host = entry.data[CONF_PS4_HOST]
+        self._attr_unique_id = f"{DOMAIN}_{host}_rsx_temp"
+        self._attr_name = "RSX Temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        temp = data.get(SENSOR_RSX_TEMP)
+        return float(temp) if temp is not None else None
