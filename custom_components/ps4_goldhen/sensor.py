@@ -80,6 +80,7 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
+        # We explicitly return our internal variable, so HA never says "Unknown"
         return self._resolved_name
 
     async def async_added_to_hass(self) -> None:
@@ -110,6 +111,7 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
             self._resolved_name = new_title_id or "Idle"
             self._current_source = None
             self._current_error = None
+            self.async_write_ha_state() # Force the state to update immediately
             return
 
         # It's a new Title ID, launch a background task to resolve the actual name
@@ -124,9 +126,11 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         
         # Ensure the ID didn't change while we were waiting for the network
         if self._current_title_id == title_id:
-            self._resolved_name = res.name or title_id
+            # Check if name is None, fallback to title_id
+            self._resolved_name = res.name if res.name is not None else title_id
             self._current_source = res.source
             self._current_error = res.error
+            # Force Home Assistant to push the updated name to the UI
             self.async_write_ha_state()
 
 
