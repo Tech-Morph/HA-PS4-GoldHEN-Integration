@@ -95,18 +95,22 @@ class PS4CurrentGameSensor(SensorEntity):
             self._monitor_task.cancel()
 
     async def _klog_monitor_loop(self) -> None:
+        import time
         while True:
             writer = None
             try:
+                # Give a tiny buffer before connecting to ensure PS4 socket is ready
+                await asyncio.sleep(0.5) 
                 reader, writer = await asyncio.open_connection(self._host, 3232)
                 _LOGGER.debug("Connected to PS4 klog at %s:3232", self._host)
 
                 while True:
                     line_bytes = await reader.readline()
                     
-                    # Empty bytes usually means connection was closed by peer
+                    # When a game launches, the PS4 klog socket drops the connection briefly.
+                    # Instead of treating this as an error, we silently break to reconnect.
                     if not line_bytes:
-                        _LOGGER.debug("PS4 klog stream closed by peer")
+                        _LOGGER.debug("PS4 klog stream closed by peer (typical during app switch)")
                         break
 
                     line = line_bytes.decode("utf-8", errors="ignore")
@@ -140,16 +144,25 @@ class PS4CurrentGameSensor(SensorEntity):
             except Exception as err:
                 _LOGGER.debug("PS4 klog connection error: %s", err)
                 
-            # If the socket drops but we JUST updated the state less than 5 seconds ago, 
-            # assume it's the expected app-change reset and DO NOT write "Disconnected" to HA.
-            if time.time() - self._last_update_time > 5.0:
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                
+            # If we haven't seen a game update in the last 15 seconds, and the socket 
+            # is broken, ONLY THEN do we consider the PS4 truly disconnected/offline.
+            if time.time() - self._last_update_time > 15.0:
                 self._attr_native_value = "Disconnected"
                 self._current_source = "klog_dropped"
                 self._current_error = "Connection dropped"
                 self.async_write_ha_state()
 
-            # Wait only 2 seconds before aggressively reconnecting so we don't miss logs
-            await asyncio.sleep(2)
+            # Wait only 1 second before silently reconnecting so we catch the new game log
+            await asyncio.sleep(1)
+
 
 
 class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
