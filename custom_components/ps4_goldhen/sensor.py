@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
@@ -72,6 +73,9 @@ class PS4CurrentGameSensor(SensorEntity):
         self._current_title_id: str | None = None
         self._current_source: str | None = None
         self._current_error: str | None = None
+        
+        # Track the last time we successfully read a game launch to prevent UI flapping
+        self._last_update_time = 0.0
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -99,7 +103,10 @@ class PS4CurrentGameSensor(SensorEntity):
 
                 while True:
                     line_bytes = await reader.readline()
+                    
+                    # Empty bytes usually means connection was closed by peer
                     if not line_bytes:
+                        _LOGGER.debug("PS4 klog stream closed by peer")
                         break
 
                     line = line_bytes.decode("utf-8", errors="ignore")
@@ -122,6 +129,7 @@ class PS4CurrentGameSensor(SensorEntity):
                         self._current_error = res.error
 
                     self._attr_native_value = resolved_name
+                    self._last_update_time = time.time()
                     self.async_write_ha_state()
 
             except asyncio.CancelledError:
@@ -131,12 +139,17 @@ class PS4CurrentGameSensor(SensorEntity):
                 break
             except Exception as err:
                 _LOGGER.debug("PS4 klog connection error: %s", err)
+                
+            # If the socket drops but we JUST updated the state less than 5 seconds ago, 
+            # assume it's the expected app-change reset and DO NOT write "Disconnected" to HA.
+            if time.time() - self._last_update_time > 5.0:
                 self._attr_native_value = "Disconnected"
-                self._current_source = "klog"
-                self._current_error = str(err)
+                self._current_source = "klog_dropped"
+                self._current_error = "Connection dropped"
                 self.async_write_ha_state()
 
-            await asyncio.sleep(10)
+            # Wait only 2 seconds before aggressively reconnecting so we don't miss logs
+            await asyncio.sleep(2)
 
 
 class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
@@ -157,3 +170,4 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
         return float(temp) if temp is not None else None
+
