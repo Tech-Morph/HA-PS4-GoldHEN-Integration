@@ -45,35 +45,39 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# How often we poll FTP reachability for the sensor
 _FTP_POLL_INTERVAL = timedelta(seconds=30)
-
-# Service names
 _SVC_SEND_PAYLOAD = "send_payload"
 
-# GLOBAL panel (single sidebar item)
 _PANEL_URL_PATH = "ps4_goldhen"
 _PANEL_SIDEBAR_TITLE = "PS4 GoldHEN"
 _PANEL_SIDEBAR_ICON = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
-# Frontend static paths (served by HA)
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-# Bump version to force browser cache refresh
 _JS_MODULE_URL = f"{_JS_STATIC_URL}?v=1.0.0"
 _LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
-# Bundled payloads shipped with the integration
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
-# Klog parsing patterns
-_KLOG_GAME_PATTERN = re.compile(
-    r"Starting\s+(.+?)(?:\s+\(CUSA\d+\))?", re.IGNORECASE
+_TITLE_ID_RE = re.compile(r"([A-Z]{4}\d{5})")
+_KLOG_DIRECT_TITLE_PATTERNS = (
+    re.compile(r"D/88391:([A-Z]{4}\d{5})"),
+    re.compile(r"launchApp\(([A-Z]{4}\d{5})\)"),
+    re.compile(r"GameStartBoot\(([A-Z]{4}\d{5}),"),
+    re.compile(r"GameWillStart\(([A-Z]{4}\d{5}),"),
+    re.compile(r"createApp\s+([A-Z]{4}\d{5})"),
+    re.compile(r"title_id='([A-Z]{4}\d{5})'"),
+    re.compile(r"titleId\s*=\s*([A-Z]{4}\d{5})"),
 )
+_KLOG_FOCUS_PATTERN = re.compile(r"AppFocusChanged\s+([A-Z0-9]+)\s+-\s+([A-Z0-9]+)")
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(
-    r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE
+_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
+_KLOG_IDLE_PATTERNS = (
+    re.compile(r"Power Mode Change:\s*STANDBY", re.IGNORECASE),
+    re.compile(r"Power Mode Change:\s*REST", re.IGNORECASE),
+    re.compile(r"Power Mode Change:\s*OFF", re.IGNORECASE),
+    re.compile(r"Power Mode Change:\s*SUSPEND", re.IGNORECASE),
 )
 
 
@@ -194,13 +198,44 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
         raise HomeAssistantError(f"Connection to PS4 BinLoader failed: {err}") from err
 
 
+def _is_real_game_title_id(value: str | None) -> bool:
+    """Return True for real game/app title IDs, but ignore shell/system IDs like NPXS20001."""
+    if not value:
+        return False
+    value = value.strip().upper()
+    return bool(_TITLE_ID_RE.fullmatch(value)) and not value.startswith("NPXS")
+
+
+def _set_current_game(klog_data: dict[str, Any], title_id: str | None) -> bool:
+    """Store current game only if it is a real game title ID."""
+    if not _is_real_game_title_id(title_id):
+        return False
+
+    title_id = title_id.strip().upper()
+    if klog_data.get(SENSOR_CURRENT_GAME) != title_id:
+        klog_data[SENSOR_CURRENT_GAME] = title_id
+        _LOGGER.debug("Detected current game title ID: %s", title_id)
+    return True
+
+
 def _parse_klog_line(line: str, klog_data: dict[str, Any]) -> None:
     """Parse a single klog line and update klog_data dict."""
-    match = _KLOG_GAME_PATTERN.search(line)
-    if match:
-        game_title = match.group(1).strip()
-        klog_data[SENSOR_CURRENT_GAME] = game_title
-        _LOGGER.debug("Detected game: %s", game_title)
+    for pattern in _KLOG_DIRECT_TITLE_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            if _set_current_game(klog_data, match.group(1)):
+                break
+    else:
+        match = _KLOG_FOCUS_PATTERN.search(line)
+        if match:
+            new_app = match.group(2).strip().upper()
+            _set_current_game(klog_data, new_app)
+        else:
+            for idle_pattern in _KLOG_IDLE_PATTERNS:
+                if idle_pattern.search(line):
+                    klog_data[SENSOR_CURRENT_GAME] = "Idle"
+                    _LOGGER.debug("Detected idle/standby state")
+                    break
 
     match = _KLOG_CPU_TEMP_PATTERN.search(line)
     if match:
@@ -251,11 +286,9 @@ async def _klog_listener_task(
                     entry_data = hass.data[DOMAIN].get(entry_id)
                     if entry_data and "klog_data" in entry_data:
                         _parse_klog_line(line, entry_data["klog_data"])
-
-                        if coordinator.data:
-                            coordinator.async_set_updated_data(
-                                {**coordinator.data, **entry_data["klog_data"]}
-                            )
+                        coordinator.async_set_updated_data(
+                            {**(coordinator.data or {}), **entry_data["klog_data"]}
+                        )
 
             writer.close()
             await writer.wait_closed()
@@ -339,7 +372,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     root = _ensure_domain_root(hass)
 
-    # If a previous task somehow exists (e.g., partial unload), cancel it to avoid duplicates.
     prev = root.get(entry.entry_id)
     if isinstance(prev, dict) and prev.get("klog_task") is not None:
         task = prev["klog_task"]
@@ -356,12 +388,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     root[entry.entry_id]["klog_data"] = {
-        SENSOR_CURRENT_GAME: "Unknown",
+        SENSOR_CURRENT_GAME: "Idle",
         SENSOR_CPU_TEMP: None,
         SENSOR_RSX_TEMP: None,
     }
 
-    # IMPORTANT: Use a background task so it will not block Home Assistant startup.
     klog_task = entry.async_create_background_task(
         hass,
         _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator),
@@ -502,7 +533,6 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    # Always cancel the klog task first to prevent duplicate listeners on reload.
     entry_data = _ensure_domain_root(hass).get(entry.entry_id)
     if entry_data and entry_data.get("klog_task") is not None:
         task = entry_data["klog_task"]
