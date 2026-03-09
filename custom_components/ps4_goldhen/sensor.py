@@ -16,6 +16,9 @@ from .const import (
     SENSOR_RSX_TEMP,
 )
 
+_HOME_SCREEN_STATE = "PlayStation Home Screen"
+_IDLE_STATE = "Idle"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -73,13 +76,20 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         if isinstance(value, str) and value.strip():
             return value.strip()
 
-        return "Idle"
+        return _HOME_SCREEN_STATE
 
     @property
     def extra_state_attributes(self) -> dict:
         value = self.native_value
         return {
-            "title_id": value if value != "Idle" else None,
+            "title_id": value if value not in (_HOME_SCREEN_STATE, _IDLE_STATE) else None,
+            "state_classification": (
+                "home_screen"
+                if value == _HOME_SCREEN_STATE
+                else "idle"
+                if value == _IDLE_STATE
+                else "game"
+            ),
         }
 
 
