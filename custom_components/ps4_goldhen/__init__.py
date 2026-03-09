@@ -11,7 +11,8 @@ import os
 import posixpath
 import re
 import shutil
-import struct
+import sqlite3
+import tempfile
 import time
 from collections import deque
 from datetime import timedelta
@@ -74,7 +75,6 @@ _IDLE_STATE = "Idle"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
-_SFO_MAGIC = b"\x00PSF"
 
 _KLOG_LAUNCH_PATTERNS = (
     re.compile(r"launchApp\(\)\s*titleId=\[?([A-Z]{4}\d{5})\]?", re.IGNORECASE),
@@ -144,6 +144,11 @@ _KLOG_NOISE_PATTERNS = (
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 _KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
+_APP_DB_CANDIDATES = (
+    "/system_data/priv/mms/app.db",
+    "/system_data/priv/mms/app.db.bak",
+)
+
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     hass.data.setdefault(DOMAIN, {})
@@ -154,6 +159,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("bundled_payloads_installed", False)
+    g.setdefault("services_registered", False)
     g.setdefault("views_registered", False)
     return root
 
@@ -279,210 +285,182 @@ def _merge_title_maps(
     return dict(sorted(merged.items()))
 
 
-def _sfo_parse_entries(data: bytes) -> dict[str, Any]:
-    if len(data) < 20 or data[:4] != _SFO_MAGIC:
-        raise ValueError("Invalid PARAM.SFO header")
-
-    _magic, version, key_table_offset, data_table_offset, entry_count = struct.unpack_from(
-        "<4sIIII", data, 0
-    )
-
-    if version == 0:
-        raise ValueError("Invalid PARAM.SFO version")
-
-    entries: dict[str, Any] = {}
-
-    for index in range(entry_count):
-        entry_offset = 20 + (index * 16)
-        if entry_offset + 16 > len(data):
-            break
-
-        key_offset, fmt, data_len, data_max_len, data_offset = struct.unpack_from(
-            "<HHIII", data, entry_offset
-        )
-
-        key_start = key_table_offset + key_offset
-        if key_start >= len(data):
-            continue
-
-        key_end = data.find(b"\x00", key_start)
-        if key_end == -1:
-            continue
-
-        key = data[key_start:key_end].decode("utf-8", errors="ignore").strip()
-        if not key:
-            continue
-
-        value_start = data_table_offset + data_offset
-        value_end = value_start + min(data_len, data_max_len if data_max_len else data_len)
-        if value_start >= len(data):
-            continue
-
-        raw = data[value_start:min(value_end, len(data))]
-
-        if fmt in (0x0004, 0x0204):
-            value = raw.split(b"\x00", 1)[0].decode("utf-8", errors="ignore").strip()
-        elif fmt == 0x0404 and len(raw) >= 4:
-            value = struct.unpack_from("<I", raw, 0)[0]
-        else:
-            value = raw
-
-        entries[key] = value
-
-    return entries
-
-
-def _extract_title_info_from_sfo(data: bytes) -> tuple[str | None, str | None]:
-    entries = _sfo_parse_entries(data)
-
-    content_id = entries.get("CONTENT_ID")
-    if not isinstance(content_id, str):
-        content_id = str(content_id or "")
-
-    title_id = _normalize_title_id(
-        entries.get("TITLE_ID")
-        or entries.get("TITLEID")
-        or (content_id[-9:] if content_id else None)
-    )
-
-    name = None
-    for key in ("TITLE", "STITLE", "TITLE_0", "TITLE_00"):
-        value = entries.get(key)
-        if isinstance(value, str) and value.strip():
-            name = value.strip()
-            break
-
-    return title_id, name
-
-
-def _ftp_list_names(ftp: ftplib.FTP, remote_dir: str) -> list[str]:
-    current_dir = ftp.pwd()
-    names: list[str] = []
-
-    try:
-        ftp.cwd(remote_dir)
-    except Exception as err:
-        _LOGGER.debug("Cannot cwd to %s: %s", remote_dir, err)
-        return names
-
-    try:
-        try:
-            for name, _facts in ftp.mlsd():
-                names.append(name)
-        except Exception:
-            for name in ftp.nlst():
-                base = posixpath.basename(str(name).rstrip("/"))
-                if base:
-                    names.append(base)
-    finally:
-        with contextlib.suppress(Exception):
-            ftp.cwd(current_dir)
-
-    out: list[str] = []
-    seen: set[str] = set()
-
-    for name in names:
-        if name in (".", ".."):
-            continue
-        if name not in seen:
-            seen.add(name)
-            out.append(name)
-
-    return out
-
-
-def _ftp_read_file_if_exists(ftp: ftplib.FTP, remote_path: str) -> bytes | None:
+def _ftp_read_file(ftp: ftplib.FTP, remote_path: str) -> bytes:
     buffer = io.BytesIO()
-    try:
-        ftp.retrbinary(f"RETR {remote_path}", buffer.write)
-        return buffer.getvalue()
-    except Exception:
-        return None
+    ftp.retrbinary(f"RETR {remote_path}", buffer.write)
+    return buffer.getvalue()
 
 
-def _candidate_title_roots() -> tuple[str, ...]:
-    return (
-        "/user/appmeta",
-        "/user/app",
-        "/mnt/ext0/user/appmeta",
-        "/mnt/ext0/user/app",
-        "/mnt/ext1/user/appmeta",
-        "/mnt/ext1/user/app",
-    )
-
-
-def _candidate_sfo_paths_for_title(title_id: str) -> tuple[str, ...]:
-    return (
-        f"/user/appmeta/{title_id}/param.sfo",
-        f"/user/appmeta/{title_id}/PARAM.SFO",
-        f"/user/appmeta/{title_id}/sce_sys/param.sfo",
-        f"/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
-        f"/user/app/{title_id}/sce_sys/param.sfo",
-        f"/user/app/{title_id}/sce_sys/PARAM.SFO",
-        f"/mnt/ext0/user/appmeta/{title_id}/param.sfo",
-        f"/mnt/ext0/user/appmeta/{title_id}/PARAM.SFO",
-        f"/mnt/ext0/user/appmeta/{title_id}/sce_sys/param.sfo",
-        f"/mnt/ext0/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
-        f"/mnt/ext0/user/app/{title_id}/sce_sys/param.sfo",
-        f"/mnt/ext0/user/app/{title_id}/sce_sys/PARAM.SFO",
-        f"/mnt/ext1/user/appmeta/{title_id}/param.sfo",
-        f"/mnt/ext1/user/appmeta/{title_id}/PARAM.SFO",
-        f"/mnt/ext1/user/appmeta/{title_id}/sce_sys/param.sfo",
-        f"/mnt/ext1/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
-        f"/mnt/ext1/user/app/{title_id}/sce_sys/param.sfo",
-        f"/mnt/ext1/user/app/{title_id}/sce_sys/PARAM.SFO",
-    )
-
-
-def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]:
-    title_map: dict[str, dict[str, Any]] = {}
-    title_ids: set[str] = set()
+def _download_app_db_bytes(host: str, port: int) -> tuple[str, bytes]:
+    last_error: Exception | None = None
 
     with ftplib.FTP() as ftp:
         ftp.connect(host, int(port), timeout=20)
         ftp.login()
 
-        for root in _candidate_title_roots():
-            names = _ftp_list_names(ftp, root)
-            _LOGGER.warning("PS4 title scan root %s returned %d entries", root, len(names))
-            for name in names:
-                tid = _normalize_title_id(name)
-                if tid:
-                    title_ids.add(tid)
+        for candidate in _APP_DB_CANDIDATES:
+            try:
+                db_bytes = _ftp_read_file(ftp, candidate)
+                if db_bytes:
+                    return candidate, db_bytes
+            except Exception as err:
+                last_error = err
 
-        _LOGGER.warning("PS4 title scan discovered %d title IDs before SFO parsing", len(title_ids))
+    if last_error:
+        raise last_error
 
-        for title_id in sorted(title_ids):
-            parsed_name: str | None = None
-            parsed_title_id: str | None = None
-            used_path: str | None = None
+    raise FileNotFoundError("Unable to download app.db from PS4 FTP")
 
-            for candidate in _candidate_sfo_paths_for_title(title_id):
-                sfo_bytes = _ftp_read_file_if_exists(ftp, candidate)
-                if not sfo_bytes:
+
+def _sqlite_escape_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> dict[str, str]:
+    escaped = _sqlite_escape_ident(table_name)
+    rows = conn.execute(f"PRAGMA table_info({escaped})").fetchall()
+    mapping: dict[str, str] = {}
+
+    for row in rows:
+        col_name = str(row[1])
+        mapping[col_name.lower()] = col_name
+
+    return mapping
+
+
+def _list_appbrowse_tables(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND (
+            lower(name) LIKE 'tblappbrowse%'
+            OR lower(name) LIKE 'tbl_appbrowse%'
+          )
+        ORDER BY name
+        """
+    ).fetchall()
+
+    return [str(row[0]) for row in rows if row and row[0]]
+
+
+def _build_select_for_appbrowse_table(table_name: str, columns: dict[str, str]) -> str | None:
+    required = {"titleid", "titlename"}
+    if not required.issubset(columns):
+        return None
+
+    aliases = {
+        "titleid": "titleId",
+        "titlename": "titleName",
+        "metadatapath": "metaDataPath",
+        "thumbnailurl": "thumbnailUrl",
+        "hddlocation": "hddLocation",
+        "externalhddappstatus": "externalHddAppStatus",
+        "contentid": "contentId",
+        "contenttype": "contentType",
+        "category": "category",
+        "pathinfo": "pathInfo",
+        "visible": "visible",
+    }
+
+    select_parts: list[str] = []
+    for key, alias in aliases.items():
+        if key in columns:
+            select_parts.append(f'{_sqlite_escape_ident(columns[key])} AS "{alias}"')
+
+    if not select_parts:
+        return None
+
+    sql = f"SELECT {', '.join(select_parts)} FROM {_sqlite_escape_ident(table_name)}"
+
+    if "visible" in columns:
+        sql += f" WHERE {_sqlite_escape_ident(columns['visible'])} = 1"
+
+    return sql
+
+
+def _extract_title_map_from_app_db_bytes(db_bytes: bytes, db_path: str) -> dict[str, dict[str, Any]]:
+    title_map: dict[str, dict[str, Any]] = {}
+    temp_path = ""
+
+    try:
+        with tempfile.NamedTemporaryFile(prefix="ps4_goldhen_appdb_", suffix=".db", delete=False) as tmp:
+            tmp.write(db_bytes)
+            temp_path = tmp.name
+
+        conn = sqlite3.connect(temp_path)
+        try:
+            conn.row_factory = sqlite3.Row
+
+            tables = _list_appbrowse_tables(conn)
+            _LOGGER.warning("PS4 app.db scan found %d app-browse tables", len(tables))
+
+            total_rows = 0
+
+            for table_name in tables:
+                columns = _sqlite_table_columns(conn, table_name)
+                query = _build_select_for_appbrowse_table(table_name, columns)
+
+                if not query:
+                    _LOGGER.debug("Skipping table %s because required columns were not found", table_name)
                     continue
 
-                try:
-                    parsed_title_id, parsed_name = _extract_title_info_from_sfo(sfo_bytes)
-                    used_path = candidate
-                    if parsed_name:
-                        break
-                except Exception as err:
-                    _LOGGER.debug("Failed parsing %s: %s", candidate, err)
+                rows = conn.execute(query).fetchall()
+                _LOGGER.warning("PS4 app.db table %s returned %d visible rows", table_name, len(rows))
+                total_rows += len(rows)
 
-            resolved_title_id = parsed_title_id or title_id
-            if not parsed_name:
-                continue
+                for row in rows:
+                    title_id = _normalize_title_id(row["titleId"] if "titleId" in row.keys() else None)
+                    title_name = str(row["titleName"]).strip() if "titleName" in row.keys() and row["titleName"] is not None else ""
 
-            title_map[resolved_title_id] = {
-                "name": parsed_name,
-                "source": "ps4_ftp",
-                "sfo_path": used_path,
-                "last_seen": int(time.time()),
-            }
+                    if not title_id or not title_name:
+                        continue
 
-    _LOGGER.warning("PS4 title scan resolved %d titles with names", len(title_map))
+                    item: dict[str, Any] = {
+                        "name": title_name,
+                        "source": "ps4_app_db",
+                        "db_path": db_path,
+                        "db_table": table_name,
+                        "last_seen": int(time.time()),
+                    }
+
+                    for key in (
+                        "metaDataPath",
+                        "thumbnailUrl",
+                        "hddLocation",
+                        "externalHddAppStatus",
+                        "contentId",
+                        "contentType",
+                        "category",
+                        "pathInfo",
+                    ):
+                        if key in row.keys() and row[key] is not None:
+                            item[key] = row[key]
+
+                    existing = title_map.get(title_id)
+                    if existing:
+                        if existing.get("source") != "manual":
+                            title_map[title_id] = {**existing, **item}
+                    else:
+                        title_map[title_id] = item
+
+            _LOGGER.warning("PS4 app.db scan processed %d rows total", total_rows)
+        finally:
+            conn.close()
+    finally:
+        if temp_path:
+            with contextlib.suppress(Exception):
+                os.unlink(temp_path)
+
+    _LOGGER.warning("PS4 app.db scan resolved %d titles with names", len(title_map))
     return title_map
+
+
+def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]:
+    db_path, db_bytes = _download_app_db_bytes(host, port)
+    _LOGGER.warning("Downloaded PS4 app.db from %s (%d bytes)", db_path, len(db_bytes))
+    return _extract_title_map_from_app_db_bytes(db_bytes, db_path)
 
 
 async def _refresh_titles_cache(
