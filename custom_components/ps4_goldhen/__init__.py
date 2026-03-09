@@ -53,6 +53,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _FTP_POLL_INTERVAL = timedelta(seconds=30)
 _TITLES_REFRESH_INTERVAL = timedelta(hours=6)
+_KLOG_ACTIVITY_TIMEOUT = 15.0  # If no klog data for 15 seconds, assume rest/off
 
 _SVC_SEND_PAYLOAD = "send_payload"
 _SVC_REFRESH_TITLES = "refresh_titles"
@@ -606,7 +607,11 @@ class KlogStateMachine:
         # Debounce tracking for game launch transitions
         self.pending_game_launch: str | None = None
         self.pending_launch_time: float = 0.0
-        self.launch_debounce_seconds = 3.0  # Wait 3 seconds before confirming game launch
+        self.launch_debounce_seconds = 3.0
+        
+        # Track last activity for connection loss detection
+        self.last_activity_time: float = time.time()
+        self.connection_active: bool = True
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -615,7 +620,29 @@ class KlogStateMachine:
             "state_signal_line": self.last_signal_line,
             "pending_title_id": self.pending_game_launch,
             "pending_reason": "launch_debounce" if self.pending_game_launch else None,
+            "klog_connected": self.connection_active,
         }
+
+    def mark_activity(self) -> None:
+        """Mark that we received klog data (connection is alive)."""
+        self.last_activity_time = time.time()
+        if not self.connection_active:
+            self.connection_active = True
+            _LOGGER.info("Klog connection restored")
+
+    def check_connection_timeout(self) -> bool:
+        """Check if klog connection has timed out (no data received)."""
+        if not self.connection_active:
+            return False
+            
+        elapsed = time.time() - self.last_activity_time
+        if elapsed >= _KLOG_ACTIVITY_TIMEOUT:
+            self.connection_active = False
+            _LOGGER.warning("Klog connection timeout detected (%.1fs since last data)", elapsed)
+            # When connection drops, assume rest mode
+            changed = self._set_state(_REST_MODE_STATE, "klog_connection_lost", "No klog data received")
+            return changed
+        return False
 
     def _set_state(self, state: str, reason: str, line: str) -> bool:
         changed = (
@@ -652,6 +679,7 @@ class KlogStateMachine:
 
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
+        self.mark_activity()  # Mark that we received data
 
         # Check pending launch debounce first
         if self._check_pending_launch():
@@ -686,7 +714,7 @@ class KlogStateMachine:
                     # Start debounce period for game launch
                     self.pending_game_launch = title_id
                     self.pending_launch_time = time.time()
-                    _LOGGER.debug("Game launch detected: %s, starting %0.1fs debounce", title_id, self.launch_debounce_seconds)
+                    _LOGGER.debug("Game launch detected: %s, starting %.1fs debounce", title_id, self.launch_debounce_seconds)
                     return False  # Don't change state yet, wait for debounce
 
         # PRIORITY 2: AppFocusChanged pattern
@@ -776,8 +804,7 @@ async def _klog_listener_task(
 ) -> None:
     _LOGGER.info("Starting klog listener for %s:%d", host, port)
 
-    # Add a periodic check for pending launches
-    last_debounce_check = time.time()
+    last_timeout_check = time.time()
 
     while True:
         try:
@@ -790,14 +817,21 @@ async def _klog_listener_task(
                 try:
                     chunk = await asyncio.wait_for(reader.read(4096), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # Check debounce state periodically even when no data is coming
+                    # Check connection timeout and debounce state periodically
                     current_time = time.time()
-                    if (current_time - last_debounce_check) >= 0.5:
-                        last_debounce_check = current_time
+                    if (current_time - last_timeout_check) >= 1.0:
+                        last_timeout_check = current_time
                         entry_data = hass.data[DOMAIN].get(entry_id)
                         if entry_data and "klog_state_machine" in entry_data:
                             state_machine: KlogStateMachine = entry_data["klog_state_machine"]
-                            if state_machine._check_pending_launch():
+                            
+                            # Check for connection timeout (no data received)
+                            timeout_changed = state_machine.check_connection_timeout()
+                            
+                            # Check for pending launch completion
+                            debounce_changed = state_machine._check_pending_launch()
+                            
+                            if timeout_changed or debounce_changed:
                                 klog_data = entry_data["klog_data"]
                                 klog_data.update(state_machine.snapshot())
                                 coordinator.async_set_updated_data(
