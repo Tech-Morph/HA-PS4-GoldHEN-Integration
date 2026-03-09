@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
@@ -67,9 +68,13 @@ _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
 # Klog parsing patterns
-_KLOG_GAME_PATTERN = re.compile(r"Starting\s+(.+?)(?:\s+\(CUSA\d+\))?", re.IGNORECASE)
+_KLOG_GAME_PATTERN = re.compile(
+    r"Starting\s+(.+?)(?:\s+\(CUSA\d+\))?", re.IGNORECASE
+)
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
+_KLOG_RSX_TEMP_PATTERN = re.compile(
+    r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE
+)
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -123,9 +128,7 @@ def _list_payloads_blocking(payload_dir: str) -> list[str]:
         name = entry.name
         if name.lower() in hidden:
             continue
-        if entry.is_file() and (
-            name.lower().endswith(".bin") or name.lower().endswith(".elf")
-        ):
+        if entry.is_file() and (name.lower().endswith(".bin") or name.lower().endswith(".elf")):
             items.append(name)
 
     return items
@@ -135,30 +138,24 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
     g = _global(hass)
 
     if not g["frontend_registered"]:
-        payload_icons_dir = hass.config.path(
-            f"custom_components/{DOMAIN}/frontend/payload_icons"
-        )
-        await hass.async_add_executor_job(
-            partial(os.makedirs, payload_icons_dir, exist_ok=True)
-        )
+        payload_icons_dir = hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons")
+        await hass.async_add_executor_job(partial(os.makedirs, payload_icons_dir, exist_ok=True))
 
-        await hass.http.async_register_static_paths([
-            StaticPathConfig(
-                _JS_STATIC_URL,
-                hass.config.path(
-                    f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    _JS_STATIC_URL,
+                    hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"),
+                    False,
                 ),
-                False,
-            ),
-            StaticPathConfig(
-                _LOGO_STATIC_URL,
-                hass.config.path(
-                    f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"
+                StaticPathConfig(
+                    _LOGO_STATIC_URL,
+                    hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"),
+                    False,
                 ),
-                False,
-            ),
-            StaticPathConfig(_PAYLOAD_ICONS_STATIC_URL, payload_icons_dir, False),
-        ])
+                StaticPathConfig(_PAYLOAD_ICONS_STATIC_URL, payload_icons_dir, False),
+            ]
+        )
         g["frontend_registered"] = True
 
     if not g["panel_registered"]:
@@ -175,50 +172,36 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
         g["panel_registered"] = True
 
 
-async def _send_bin_tcp(
-    host: str, port: int, filepath: str, timeout: float = 30.0
-) -> None:
+async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
     """Stream a local payload file to host:port."""
     loop = asyncio.get_running_loop()
 
     try:
-        data = await loop.run_in_executor(
-            None, lambda: open(filepath, "rb").read()
-        )
+        data = await loop.run_in_executor(None, lambda: open(filepath, "rb").read())
     except Exception as err:
-        raise HomeAssistantError(
-            f"Cannot read payload file {filepath}: {err}"
-        ) from err
+        raise HomeAssistantError(f"Cannot read payload file {filepath}: {err}") from err
 
-    _LOGGER.info(
-        "Sending payload %s to %s:%d", os.path.basename(filepath), host, port
-    )
+    _LOGGER.info("Sending payload %s to %s:%d", os.path.basename(filepath), host, port)
 
     try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
         writer.write(data)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
         writer.close()
         await writer.wait_closed()
         _LOGGER.info("Payload sent successfully.")
     except Exception as err:
-        raise HomeAssistantError(
-            f"Connection to PS4 BinLoader failed: {err}"
-        ) from err
+        raise HomeAssistantError(f"Connection to PS4 BinLoader failed: {err}") from err
 
 
 def _parse_klog_line(line: str, klog_data: dict[str, Any]) -> None:
     """Parse a single klog line and update klog_data dict."""
-    # Parse game title
     match = _KLOG_GAME_PATTERN.search(line)
     if match:
         game_title = match.group(1).strip()
         klog_data[SENSOR_CURRENT_GAME] = game_title
         _LOGGER.debug("Detected game: %s", game_title)
 
-    # Parse CPU temperature
     match = _KLOG_CPU_TEMP_PATTERN.search(line)
     if match:
         try:
@@ -228,7 +211,6 @@ def _parse_klog_line(line: str, klog_data: dict[str, Any]) -> None:
         except ValueError:
             pass
 
-    # Parse RSX temperature
     match = _KLOG_RSX_TEMP_PATTERN.search(line)
     if match:
         try:
@@ -248,12 +230,10 @@ async def _klog_listener_task(
 ) -> None:
     """Background task to listen to klog stream and update coordinator."""
     _LOGGER.info("Starting klog listener for %s:%d", host, port)
-    
+
     while True:
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=10
-            )
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
             _LOGGER.info("Connected to klog at %s:%d", host, port)
 
             buf = b""
@@ -268,17 +248,14 @@ async def _klog_listener_task(
                     raw, buf = buf.split(b"\n", 1)
                     line = raw.decode("utf-8", errors="replace").rstrip("\r")
 
-                    # Parse the line and update stored klog_data
                     entry_data = hass.data[DOMAIN].get(entry_id)
                     if entry_data and "klog_data" in entry_data:
                         _parse_klog_line(line, entry_data["klog_data"])
-                        
-                        # Update coordinator data to include klog_data
+
                         if coordinator.data:
-                            coordinator.async_set_updated_data({
-                                **coordinator.data,
-                                **entry_data["klog_data"]
-                            })
+                            coordinator.async_set_updated_data(
+                                {**coordinator.data, **entry_data["klog_data"]}
+                            )
 
             writer.close()
             await writer.wait_closed()
@@ -290,8 +267,7 @@ async def _klog_listener_task(
             raise
         except Exception as err:
             _LOGGER.warning("Klog listener error: %s, retrying in 30s", err)
-        
-        # Wait before reconnecting
+
         await asyncio.sleep(30)
 
 
@@ -326,12 +302,8 @@ async def ws_list_payloads(
     msg: dict,
 ) -> None:
     try:
-        items = await hass.async_add_executor_job(
-            _list_payloads_blocking, PAYLOAD_DIR
-        )
-        connection.send_result(
-            msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR}
-        )
+        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
+        connection.send_result(msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR})
     except Exception as err:
         connection.send_error(msg["id"], "list_error", str(err))
 
@@ -366,6 +338,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     root = _ensure_domain_root(hass)
+
+    # If a previous task somehow exists (e.g., partial unload), cancel it to avoid duplicates.
+    prev = root.get(entry.entry_id)
+    if isinstance(prev, dict) and prev.get("klog_task") is not None:
+        task = prev["klog_task"]
+        with contextlib.suppress(Exception):
+            task.cancel()
+
     root[entry.entry_id] = {
         "coordinator": coordinator,
         "host": host,
@@ -375,16 +355,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_port": klog_port,
     }
 
-    # Store for klog-parsed sensor data
     root[entry.entry_id]["klog_data"] = {
         SENSOR_CURRENT_GAME: "Unknown",
         SENSOR_CPU_TEMP: None,
         SENSOR_RSX_TEMP: None,
     }
 
-    # Start klog listener background task
-    klog_task = hass.async_create_task(
-        _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator)
+    # IMPORTANT: Use a background task so it will not block Home Assistant startup.
+    klog_task = entry.async_create_background_task(
+        _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator),
+        name=f"{DOMAIN}_klog_{entry.entry_id}",
     )
     root[entry.entry_id]["klog_task"] = klog_task
 
@@ -395,6 +375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, ws_list_payloads)
 
         from .websocket import async_setup as async_setup_websocket
+
         async_setup_websocket(hass)
         g["ws_registered"] = True
 
@@ -404,31 +385,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
         g["bundled_payloads_installed"] = True
 
-    _SEND_PAYLOAD_SCHEMA = vol.Schema({
-        vol.Required("payload_file"): str,
-        vol.Optional("ps4_host"): str,
-        vol.Optional("binloader_port"): vol.All(
-            vol.Coerce(int), vol.Range(min=1024, max=65535)
-        ),
-        vol.Optional("timeout", default=30): vol.All(
-            vol.Coerce(float), vol.Range(min=1)
-        ),
-    })
+    _SEND_PAYLOAD_SCHEMA = vol.Schema(
+        {
+            vol.Required("payload_file"): str,
+            vol.Optional("ps4_host"): str,
+            vol.Optional("binloader_port"): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
+            vol.Optional("timeout", default=30): vol.All(vol.Coerce(float), vol.Range(min=1)),
+        }
+    )
 
     async def handle_send_payload(call: ServiceCall) -> None:
         p_file = call.data["payload_file"]
         t_host = call.data.get("ps4_host") or host
         t_port = int(call.data.get("binloader_port") or binloader_port)
-        filepath = (
-            p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
-        )
+        filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
         await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(
-            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
-            schema=_SEND_PAYLOAD_SCHEMA,
-        )
+        hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
 
     hass.http.register_view(PS4FTPDownloadView())
     hass.http.register_view(PS4FTPUploadView())
@@ -471,10 +445,7 @@ class PS4FTPDownloadView(HomeAssistantView):
             return web.Response(
                 body=content,
                 content_type="application/octet-stream",
-                headers={
-                    "Content-Disposition":
-                    f'attachment; filename="{os.path.basename(path)}"'
-                },
+                headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
             )
         except Exception as err:
             return web.Response(text=f"FTP Error: {err}", status=500)
@@ -519,9 +490,7 @@ class PS4FTPUploadView(HomeAssistantView):
                 ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
 
         try:
-            await request.app["hass"].async_add_executor_job(
-                _upload_file, await file_field.read(decode=True)
-            )
+            await request.app["hass"].async_add_executor_job(_upload_file, await file_field.read(decode=True))
             return web.json_response({"success": True, "path": full_dest})
         except Exception as err:
             return web.Response(text=f"FTP Upload Error: {err}", status=500)
@@ -532,14 +501,17 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Always cancel the klog task first to prevent duplicate listeners on reload.
+    entry_data = _ensure_domain_root(hass).get(entry.entry_id)
+    if entry_data and entry_data.get("klog_task") is not None:
+        task = entry_data["klog_task"]
+        task.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(task, return_exceptions=True)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        entry_data = _ensure_domain_root(hass).get(entry.entry_id)
-        if entry_data and "klog_task" in entry_data:
-            # Cancel the klog listener task
-            entry_data["klog_task"].cancel()
-        
         _ensure_domain_root(hass).pop(entry.entry_id, None)
 
     return unload_ok
