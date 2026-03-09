@@ -53,7 +53,6 @@ _LOGGER = logging.getLogger(__name__)
 
 _FTP_POLL_INTERVAL = timedelta(seconds=30)
 _TITLES_REFRESH_INTERVAL = timedelta(hours=6)
-_KLOG_ACTIVITY_TIMEOUT = 15.0  # If no klog data for 15 seconds, assume rest/off
 
 _SVC_SEND_PAYLOAD = "send_payload"
 _SVC_REFRESH_TITLES = "refresh_titles"
@@ -72,82 +71,54 @@ _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
 _HOME_SCREEN_STATE = "PlayStation Home Screen"
 _IDLE_STATE = "Idle"
-_REST_MODE_STATE = "Rest Mode"
-_OFF_STATE = "Off"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
 
-_KLOG_LAUNCH_PATTERNS = (
-    re.compile(r"launchApp\(\)\s*titleId=\[?([A-Z]{4}\d{5})\]?", re.IGNORECASE),
-    re.compile(r"launchApp\(([A-Z]{4}\d{5})\)", re.IGNORECASE),
-    re.compile(r"GameStartBoot\(([A-Z]{4}\d{5}),", re.IGNORECASE),
-    re.compile(r"GameWillStart\(([A-Z]{4}\d{5}),", re.IGNORECASE),
-    re.compile(r"createApp\s+([A-Z]{4}\d{5})", re.IGNORECASE),
-    re.compile(r"title_id='([A-Z]{4}\d{5})'", re.IGNORECASE),
-    re.compile(r"titleId\s*=\s*([A-Z]{4}\d{5})", re.IGNORECASE),
-)
-
-_KLOG_FOCUS_PATTERN = re.compile(
-    r"AppFocusChanged\s+\[?([A-Z0-9]+)\]?\s*(?:->|-)\s*\[?([A-Z0-9]+)\]?",
+# ── Primary signals ────────────────────────────────────────────────────────────
+# "[SL] AppFocusChanged [OLD] -> [NEW]"  (the [SL] logger is ground truth)
+_KLOG_SL_FOCUS_PATTERN = re.compile(
+    r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
     re.IGNORECASE,
 )
 
-_KLOG_HOME_SCENE_PATTERNS = (
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+\[AppScreen\s*:\s*ApplicationScreenScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
-        re.IGNORECASE,
-    ),
-)
-
-_KLOG_GAME_SCENE_PATTERNS = (
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+\[ContentAreaScene\s*:\s*ContentAreaScene\]\s*->\s*\[AppScreen\s*:\s*ApplicationScreenScene\]",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+ContentAreaScene\s+ContentAreaScene\s*-\s*AppScreen\s+ApplicationScreenScene",
-        re.IGNORECASE,
-    ),
-)
-
-# Patterns for rest mode and power state detection
-_KLOG_REST_MODE_PATTERNS = (
-    re.compile(r"Power Mode Change:\s*REST", re.IGNORECASE),
-    re.compile(r"entering rest mode", re.IGNORECASE),
-    re.compile(r"System entering Rest Mode", re.IGNORECASE),
-)
-
-_KLOG_STANDBY_PATTERNS = (
-    re.compile(r"Power Mode Change:\s*STANDBY", re.IGNORECASE),
-    re.compile(r"entering standby", re.IGNORECASE),
-)
-
-_KLOG_OFF_PATTERNS = (
-    re.compile(r"Power Mode Change:\s*OFF", re.IGNORECASE),
-    re.compile(r"Power Mode Change:\s*SUSPEND", re.IGNORECASE),
-    re.compile(r"System shutting down", re.IGNORECASE),
-)
-
-_KLOG_SHELL_FG_PATTERN = re.compile(r"ShellUI is Fg", re.IGNORECASE)
-_KLOG_SHELL_BG_PATTERN = re.compile(r"ShellUI is Bg", re.IGNORECASE)
-_KLOG_VCS_SHELL_FOCUS_PATTERN = re.compile(
-    r"Focus Change\..*appType\s*=?\s*1\s*\(?SHELL[_ ]?UI\)?",
+# launchApp from SceLncService — fires before focus, good early signal
+_KLOG_LNC_LAUNCH_PATTERN = re.compile(
+    r"\[SceLncService\]\s+launchApp\(([A-Z]{4}\d{5})\)",
     re.IGNORECASE,
 )
-_KLOG_VCS_BIGAPP_FOCUS_PATTERN = re.compile(
-    r"Focus Change\..*appType\s*=?\s*5\s*\(?BIG[_ ]?APP\)?",
+
+# Game fully started (BGFT fires after binary is loaded)
+_KLOG_BGFT_GAME_START = re.compile(
+    r"\[BGFT\].*GameWillStart\(([A-Z]{4}\d{5}),",
     re.IGNORECASE,
 )
-_KLOG_RESUME_APP_PATTERN = re.compile(r"resumeApp\(\)\s*appId", re.IGNORECASE)
-_KLOG_SUSPEND_APP_PATTERN = re.compile(r"suspendApp\(\)\s*appId", re.IGNORECASE)
 
+# Game closed — fires when user quits the app
+_KLOG_GAME_CLOSE_PATTERN = re.compile(r"Game Close detected", re.IGNORECASE)
+_KLOG_BGFT_GAME_STOPPED = re.compile(
+    r"\[BGFT\].*GameStopped\(([A-Z]{4}\d{5}),",
+    re.IGNORECASE,
+)
+
+# Back to home after app exit:
+# "[SceShellUI] OnFocusActiveSceneChanged [ApplicationExitScene : ApplicationExitScene] -> [ContentAreaScene : ContentAreaScene]"
+_KLOG_EXIT_TO_HOME_PATTERN = re.compile(
+    r"OnFocusActiveSceneChanged\s+\[ApplicationExitScene\s*:\s*ApplicationExitScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
+    re.IGNORECASE,
+)
+
+# ── Noise filter ───────────────────────────────────────────────────────────────
 _KLOG_NOISE_PATTERNS = (
     re.compile(r"\bD88391\b", re.IGNORECASE),
     re.compile(r"\bfrom tbl_appbrowse_", re.IGNORECASE),
     re.compile(r"\bfrom tblappbrowse", re.IGNORECASE),
     re.compile(r"^\s*<\d+>\s*=+ bindValue", re.IGNORECASE),
     re.compile(r"^\s*<\d+>\s*=+ sql\s*=", re.IGNORECASE),
+    re.compile(r"^\s*======== sql\s*=", re.IGNORECASE),
+    re.compile(r"^\s*======== bindValue", re.IGNORECASE),
+    re.compile(r"^\s*======== limit\s*=", re.IGNORECASE),
+    re.compile(r"uhub\d+: giving up port", re.IGNORECASE),
 )
 
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
@@ -596,179 +567,110 @@ def _is_real_game_title_id(value: str | None) -> bool:
 
 
 class KlogStateMachine:
-    """Resolve the current PS4 foreground state from the full live klog stream."""
+    """
+    Resolve the current PS4 foreground state from the klog stream.
+
+    Signal priority (highest → lowest):
+      1. [SL] AppFocusChanged [OLD] -> [NEW]   ← ground truth for foreground app
+      2. [BGFT] GameWillStart(TITLEID, …)       ← game binary loaded & starting
+      3. [SceLncService] launchApp(TITLEID)     ← early launch signal
+      4. Game Close detected / GameStopped      ← game exited
+      5. OnFocusActiveSceneChanged …Exit→Content← back to home after close
+    """
 
     def __init__(self) -> None:
-        self.current_state = _HOME_SCREEN_STATE
+        self.current_title_id: str | None = None   # None = home screen
         self.last_reason = "init"
         self.last_signal_line = ""
         self.recent_lines: deque[str] = deque(maxlen=250)
-        
-        # Debounce tracking for game launch transitions
-        self.pending_game_launch: str | None = None
-        self.pending_launch_time: float = 0.0
-        self.launch_debounce_seconds = 3.0
-        
-        # Track last activity for connection loss detection
-        self.last_activity_time: float = time.time()
-        self.connection_active: bool = True
+        self.klog_connected: bool = True
+
+        # Pending launch: we saw launchApp but not yet [SL] AppFocusChanged
+        self._pending_launch: str | None = None
+
+    # ── public API ─────────────────────────────────────────────────────────────
 
     def snapshot(self) -> dict[str, Any]:
+        state = self.current_title_id if self.current_title_id else _HOME_SCREEN_STATE
         return {
-            SENSOR_CURRENT_GAME: self.current_state,
+            SENSOR_CURRENT_GAME: state,
+            "title_id": self.current_title_id,
             "state_reason": self.last_reason,
             "state_signal_line": self.last_signal_line,
-            "pending_title_id": self.pending_game_launch,
-            "pending_reason": "launch_debounce" if self.pending_game_launch else None,
-            "klog_connected": self.connection_active,
+            "pending_title_id": self._pending_launch,
+            "klog_connected": self.klog_connected,
         }
 
-    def mark_activity(self) -> None:
-        """Mark that we received klog data (connection is alive)."""
-        self.last_activity_time = time.time()
-        if not self.connection_active:
-            self.connection_active = True
-            _LOGGER.info("Klog connection restored")
-
-    def check_connection_timeout(self) -> bool:
-        """Check if klog connection has timed out (no data received)."""
-        if not self.connection_active:
-            return False
-            
-        elapsed = time.time() - self.last_activity_time
-        if elapsed >= _KLOG_ACTIVITY_TIMEOUT:
-            self.connection_active = False
-            _LOGGER.warning("Klog connection timeout detected (%.1fs since last data)", elapsed)
-            # When connection drops, assume rest mode
-            changed = self._set_state(_REST_MODE_STATE, "klog_connection_lost", "No klog data received")
-            return changed
-        return False
-
-    def _set_state(self, state: str, reason: str, line: str) -> bool:
-        changed = (
-            self.current_state != state
-            or self.last_reason != reason
-            or self.last_signal_line != line[-300:]
-        )
-        
-        # Clear any pending launch when we commit a new state
-        self.pending_game_launch = None
-        self.pending_launch_time = 0.0
-        
-        self.current_state = state
-        self.last_reason = reason
-        self.last_signal_line = line[-300:]
-        return changed
-
-    def _check_pending_launch(self) -> bool:
-        """Check if pending launch should be committed after debounce period."""
-        if not self.pending_game_launch:
-            return False
-            
-        current_time = time.time()
-        if (current_time - self.pending_launch_time) >= self.launch_debounce_seconds:
-            # Debounce period passed, commit the game launch
-            result = self._set_state(
-                self.pending_game_launch,
-                "launch_confirmed_after_debounce",
-                f"Debounced launch of {self.pending_game_launch}"
-            )
-            return result
-            
-        return False
-
     def ingest(self, line: str) -> bool:
+        """Process one klog line. Returns True if state changed."""
         self.recent_lines.append(line[-300:])
-        self.mark_activity()  # Mark that we received data
+        self.klog_connected = True
 
-        # Check pending launch debounce first
-        if self._check_pending_launch():
-            return True
-
-        # Check for rest mode patterns FIRST - highest priority
-        for pattern in _KLOG_REST_MODE_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_REST_MODE_STATE, "rest_mode_detected", line)
-
-        # Check for standby (treat as rest mode)
-        for pattern in _KLOG_STANDBY_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_REST_MODE_STATE, "standby_detected", line)
-
-        # Check for off/shutdown patterns
-        for pattern in _KLOG_OFF_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_OFF_STATE, "power_off_detected", line)
-
-        # Filter out known noisy patterns
+        # Fast-path: skip noise
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line):
                 return False
 
-        # PRIORITY 1: Detect launchApp - this is the PRIMARY game launch signal
-        for pattern in _KLOG_LAUNCH_PATTERNS:
-            match = pattern.search(line)
-            if match:
-                title_id = match.group(1).strip().upper()
-                if _is_real_game_title_id(title_id):
-                    # Start debounce period for game launch
-                    self.pending_game_launch = title_id
-                    self.pending_launch_time = time.time()
-                    _LOGGER.debug("Game launch detected: %s, starting %.1fs debounce", title_id, self.launch_debounce_seconds)
-                    return False  # Don't change state yet, wait for debounce
-
-        # PRIORITY 2: AppFocusChanged pattern
-        match = _KLOG_FOCUS_PATTERN.search(line)
-        if match:
-            old_app = match.group(1).strip().upper()
-            new_app = match.group(2).strip().upper()
-
-            # Real game title ID: commit immediately if no pending launch, or if it matches pending
+        # ── 1. [SL] AppFocusChanged — GROUND TRUTH ────────────────────────────
+        m = _KLOG_SL_FOCUS_PATTERN.search(line)
+        if m:
+            new_app = m.group(2).strip().upper()
             if _is_real_game_title_id(new_app):
-                if self.pending_game_launch == new_app:
-                    # Confirming the pending launch
-                    return self._set_state(new_app, "focus_confirmed_launch", line)
-                return self._set_state(new_app, "focus_to_game", line)
+                # Focused on a real game
+                return self._set(new_app, "sl_focus_game", line)
+            elif new_app == _HOME_SCREEN_APP_ID:
+                # Focused back on shell — only go home if we were in a game
+                if self.current_title_id is not None:
+                    return self._set(None, "sl_focus_home", line)
+            return False
 
-            # CRITICAL FIX: Ignore NPXS20001 transitions during pending launch or gameplay
-            if new_app == _HOME_SCREEN_APP_ID:
-                if self.pending_game_launch or self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE):
-                    _LOGGER.debug("Ignoring NPXS20001 transition during game state")
-                    return False
+        # ── 2. [BGFT] GameWillStart — game binary is loaded ───────────────────
+        m = _KLOG_BGFT_GAME_START.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if _is_real_game_title_id(tid):
+                self._pending_launch = tid
+                # Commit immediately as a strong signal
+                return self._set(tid, "bgft_game_will_start", line)
 
-        # When in a game or pending launch, COMPLETELY IGNORE these patterns - they're just noise
-        if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE) or self.pending_game_launch:
-            # Ignore ShellUI foreground messages during gameplay
-            if _KLOG_SHELL_FG_PATTERN.search(line):
+        # ── 3. [SceLncService] launchApp — early indicator ────────────────────
+        m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if _is_real_game_title_id(tid):
+                self._pending_launch = tid
+                # Don't commit yet — wait for [SL] AppFocusChanged or GameWillStart
+                self.last_reason = "lnc_launch_pending"
+                self.last_signal_line = line[-300:]
                 return False
 
-            # Ignore VCS shell focus messages during gameplay
-            if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
-                return False
+        # ── 4. Game closed ────────────────────────────────────────────────────
+        if _KLOG_GAME_CLOSE_PATTERN.search(line):
+            if self.current_title_id is not None:
+                return self._set(None, "game_close_detected", line)
 
-            # Ignore home scene patterns during gameplay
-            for pattern in _KLOG_HOME_SCENE_PATTERNS:
-                if pattern.search(line):
-                    return False
+        m = _KLOG_BGFT_GAME_STOPPED.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if self.current_title_id == tid:
+                return self._set(None, "bgft_game_stopped", line)
 
-        # Home detection: ONLY when we're already home/idle/rest/off
-        if self.current_state in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE):
-            for pattern in _KLOG_HOME_SCENE_PATTERNS:
-                if pattern.search(line):
-                    return self._set_state(_HOME_SCREEN_STATE, "scene_home_confirmed", line)
-
-            if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
-                return self._set_state(_HOME_SCREEN_STATE, "shell_focus_confirmed", line)
-
-            if _KLOG_SHELL_FG_PATTERN.search(line):
-                return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
-
-        # Suspend hint: ONLY signal that can force us back to home from a game
-        if _KLOG_SUSPEND_APP_PATTERN.search(line):
-            if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE):
-                return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home", line)
+        # ── 5. Exit scene → ContentArea = back to home screen ─────────────────
+        if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
+            if self.current_title_id is not None:
+                return self._set(None, "exit_scene_to_home", line)
 
         return False
+
+    # ── internal ───────────────────────────────────────────────────────────────
+
+    def _set(self, title_id: str | None, reason: str, line: str) -> bool:
+        changed = self.current_title_id != title_id
+        self.current_title_id = title_id
+        self._pending_launch = None
+        self.last_reason = reason
+        self.last_signal_line = line[-300:]
+        return changed
 
 
 def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
@@ -778,19 +680,15 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
     klog_data = entry_data["klog_data"]
     klog_data.update(state_machine.snapshot())
 
-    match = _KLOG_CPU_TEMP_PATTERN.search(line)
-    if match:
-        try:
-            klog_data[SENSOR_CPU_TEMP] = float(match.group(1))
-        except ValueError:
-            pass
+    m = _KLOG_CPU_TEMP_PATTERN.search(line)
+    if m:
+        with contextlib.suppress(ValueError):
+            klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
 
-    match = _KLOG_RSX_TEMP_PATTERN.search(line)
-    if match:
-        try:
-            klog_data[SENSOR_RSX_TEMP] = float(match.group(1))
-        except ValueError:
-            pass
+    m = _KLOG_RSX_TEMP_PATTERN.search(line)
+    if m:
+        with contextlib.suppress(ValueError):
+            klog_data[SENSOR_RSX_TEMP] = float(m.group(1))
 
     return state_changed
 
@@ -804,43 +702,23 @@ async def _klog_listener_task(
 ) -> None:
     _LOGGER.info("Starting klog listener for %s:%d", host, port)
 
-    last_timeout_check = time.time()
-
     while True:
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=10
+            )
             _LOGGER.info("Connected to klog at %s:%d", host, port)
+
+            entry_data = hass.data[DOMAIN].get(entry_id)
+            if entry_data:
+                entry_data["klog_state_machine"].klog_connected = True
 
             text_buffer = ""
 
             while True:
                 try:
-                    chunk = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=30.0)
                 except asyncio.TimeoutError:
-                    # Check connection timeout and debounce state periodically
-                    current_time = time.time()
-                    if (current_time - last_timeout_check) >= 1.0:
-                        last_timeout_check = current_time
-                        entry_data = hass.data[DOMAIN].get(entry_id)
-                        if entry_data and "klog_state_machine" in entry_data:
-                            state_machine: KlogStateMachine = entry_data["klog_state_machine"]
-                            
-                            # Check for connection timeout (no data received)
-                            timeout_changed = state_machine.check_connection_timeout()
-                            
-                            # Check for pending launch completion
-                            debounce_changed = state_machine._check_pending_launch()
-                            
-                            if timeout_changed or debounce_changed:
-                                klog_data = entry_data["klog_data"]
-                                klog_data.update(state_machine.snapshot())
-                                coordinator.async_set_updated_data(
-                                    {
-                                        **(coordinator.data or {}),
-                                        **klog_data,
-                                        "title_map_updated_at": entry_data.get("title_map_updated_at", 0),
-                                    }
-                                )
                     continue
 
                 if not chunk:
@@ -848,134 +726,84 @@ async def _klog_listener_task(
                     break
 
                 text_buffer += chunk.decode("utf-8", errors="replace")
-                parts = re.split(r"\r\n|\n|\r", text_buffer)
-                text_buffer = parts.pop() if parts else ""
+                lines = text_buffer.split("\n")
+                text_buffer = lines[-1]
 
-                for line in parts:
-                    if not line:
-                        continue
-
-                    entry_data = hass.data[DOMAIN].get(entry_id)
-                    if not entry_data or "klog_data" not in entry_data:
-                        continue
-
-                    _parse_klog_line(line, entry_data)
-                    coordinator.async_set_updated_data(
-                        {
-                            **(coordinator.data or {}),
-                            **entry_data["klog_data"],
-                            "title_map_updated_at": entry_data.get("title_map_updated_at", 0),
-                        }
-                    )
-
-            if text_buffer:
                 entry_data = hass.data[DOMAIN].get(entry_id)
-                if entry_data and "klog_data" in entry_data:
-                    _parse_klog_line(text_buffer, entry_data)
+                if not entry_data:
+                    break
+
+                changed = False
+                for line in lines[:-1]:
+                    line = line.rstrip("\r")
+                    if line:
+                        if _parse_klog_line(line, entry_data):
+                            changed = True
+
+                if changed:
                     coordinator.async_set_updated_data(
                         {
                             **(coordinator.data or {}),
                             **entry_data["klog_data"],
-                            "title_map_updated_at": entry_data.get("title_map_updated_at", 0),
                         }
                     )
 
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
-        except asyncio.TimeoutError:
-            _LOGGER.debug("Klog connection timeout, retrying...")
         except asyncio.CancelledError:
-            _LOGGER.info("Klog listener cancelled")
+            _LOGGER.info("Klog listener task cancelled")
             raise
         except Exception as err:
-            _LOGGER.warning("Klog listener error: %s, retrying in 30s", err)
+            _LOGGER.warning("Klog connection error for %s:%d: %s", host, port, err)
 
-        await asyncio.sleep(30)
+        entry_data = hass.data[DOMAIN].get(entry_id)
+        if entry_data:
+            entry_data["klog_state_machine"].klog_connected = False
+            entry_data["klog_data"]["klog_connected"] = False
+            coordinator.async_set_updated_data(
+                {
+                    **(coordinator.data or {}),
+                    **entry_data["klog_data"],
+                }
+            )
 
-
-@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
-@websocket_api.async_response
-async def ws_list_entries(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict,
-) -> None:
-    entries = hass.config_entries.async_entries(DOMAIN)
-    out = [
-        {
-            "entry_id": entry.entry_id,
-            "title": entry.title,
-            "ps4_host": entry.data.get(CONF_PS4_HOST),
-            "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
-            "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
-            "klog_port": entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT),
-            "rpi_port": entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT),
-        }
-        for entry in entries
-    ]
-    connection.send_result(msg["id"], {"entries": out})
-
-
-@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_payloads"})
-@websocket_api.async_response
-async def ws_list_payloads(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict,
-) -> None:
-    try:
-        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
-        connection.send_result(msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR})
-    except Exception as err:
-        connection.send_error(msg["id"], "list_error", str(err))
+        _LOGGER.info("Reconnecting to klog in 10s...")
+        await asyncio.sleep(10)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    root = _ensure_domain_root(hass)
+    g = root["_global"]
+
     host = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
     ftp_port = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
     rpi_port = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
     klog_port = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
-    async def _poll_ftp() -> dict[str, Any]:
-        try:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, ftp_port),
-                timeout=TCP_PROBE_TIMEOUT,
-            )
-            writer.close()
-            await writer.wait_closed()
-            return {"ftp_reachable": True}
-        except Exception:
-            return {"ftp_reachable": False}
+    titles_file = hass.config.path(f"{DOMAIN}_{entry.entry_id}_titles.json")
+
+    persisted_title_map = await hass.async_add_executor_job(
+        _load_title_map_blocking, titles_file
+    )
+
+    klog_state_machine = KlogStateMachine()
+    klog_data: dict[str, Any] = {
+        **klog_state_machine.snapshot(),
+        SENSOR_CPU_TEMP: None,
+        SENSOR_RSX_TEMP: None,
+    }
 
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
-        name=f"{DOMAIN}_{host}",
-        update_method=_poll_ftp,
+        name=f"{DOMAIN}_{entry.entry_id}",
         update_interval=_FTP_POLL_INTERVAL,
     )
 
-    await coordinator.async_config_entry_first_refresh()
-
-    root = _ensure_domain_root(hass)
-
-    prev = root.get(entry.entry_id)
-    if isinstance(prev, dict):
-        for task_key in ("klog_task", "titles_task"):
-            if prev.get(task_key) is not None:
-                task = prev[task_key]
-                with contextlib.suppress(Exception):
-                    task.cancel()
-
-    state_machine = KlogStateMachine()
-    titles_file = _titles_file_path(hass)
-    persisted_title_map = await hass.async_add_executor_job(_load_title_map_blocking, titles_file)
-
-    root[entry.entry_id] = {
-        "coordinator": coordinator,
+    entry_data: dict[str, Any] = {
         "host": host,
         "binloader_port": binloader_port,
         "ftp_port": ftp_port,
@@ -983,218 +811,318 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_port": klog_port,
         "titles_file": titles_file,
         "title_map": persisted_title_map,
-        "title_map_updated_at": int(time.time()),
-        "klog_state_machine": state_machine,
-        "klog_data": {
-            **state_machine.snapshot(),
-            SENSOR_CPU_TEMP: None,
-            SENSOR_RSX_TEMP: None,
-        },
+        "title_map_updated_at": 0,
+        "klog_state_machine": klog_state_machine,
+        "klog_data": klog_data,
+        "coordinator": coordinator,
     }
+    root[entry.entry_id] = entry_data
 
-    klog_task = entry.async_create_background_task(
-        hass,
-        _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator),
-        name=f"{DOMAIN}_klog_{entry.entry_id}",
-    )
-    root[entry.entry_id]["klog_task"] = klog_task
-
-    await _refresh_titles_cache(hass, entry.entry_id, coordinator)
-
-    titles_task = entry.async_create_background_task(
-        hass,
-        _titles_refresh_task(hass, entry.entry_id, coordinator),
-        name=f"{DOMAIN}_titles_{entry.entry_id}",
-    )
-    root[entry.entry_id]["titles_task"] = titles_task
-
-    g = _global(hass)
-
-    if not g["ws_registered"]:
-        websocket_api.async_register_command(hass, ws_list_entries)
-        websocket_api.async_register_command(hass, ws_list_payloads)
-
-        from .websocket import async_setup as async_setup_websocket
-
-        async_setup_websocket(hass)
-        g["ws_registered"] = True
-
-    await _register_frontend_and_panel_once(hass)
-
-    if not g.get("bundled_payloads_installed"):
-        await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
+    if not g["bundled_payloads_installed"]:
+        copied = await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
+        if copied:
+            _LOGGER.info("Installed %d bundled payloads to %s", copied, PAYLOAD_DIR)
         g["bundled_payloads_installed"] = True
 
-    _SEND_PAYLOAD_SCHEMA = vol.Schema(
-        {
-            vol.Required("payload_file"): str,
-            vol.Optional("ps4_host"): str,
-            vol.Optional("binloader_port"): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
-            vol.Optional("timeout", default=30): vol.All(vol.Coerce(float), vol.Range(min=1)),
-        }
-    )
+    await _register_frontend_and_panel_once(hass)
+    _register_websocket_handlers_once(hass)
+    _register_http_views_once(hass)
 
-    _REFRESH_TITLES_SCHEMA = vol.Schema(
-        {
-            vol.Optional("entry_id"): str,
-        }
-    )
-
-    async def handle_send_payload(call: ServiceCall) -> None:
-        p_file = call.data["payload_file"]
-        t_host = call.data.get("ps4_host") or host
-        t_port = int(call.data.get("binloader_port") or binloader_port)
-        filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
-        await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
-
-    async def handle_refresh_titles(call: ServiceCall) -> None:
-        requested_entry_id = call.data.get("entry_id")
-        target_entry_ids: list[str]
-
-        if requested_entry_id:
-            if requested_entry_id not in hass.data[DOMAIN]:
-                raise HomeAssistantError(f"Unknown entry_id: {requested_entry_id}")
-            target_entry_ids = [requested_entry_id]
-        else:
-            target_entry_ids = [
-                entry_id
-                for entry_id, entry_data in hass.data[DOMAIN].items()
-                if entry_id != "_global" and isinstance(entry_data, dict)
-            ]
-
-        for target_entry_id in target_entry_ids:
-            entry_data = hass.data[DOMAIN].get(target_entry_id)
-            if not entry_data:
-                continue
-            await _refresh_titles_cache(
-                hass,
-                target_entry_id,
-                entry_data["coordinator"],
-            )
-
-    if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(
-            DOMAIN,
-            _SVC_SEND_PAYLOAD,
-            handle_send_payload,
-            schema=_SEND_PAYLOAD_SCHEMA,
-        )
-
-    if not hass.services.has_service(DOMAIN, _SVC_REFRESH_TITLES):
-        hass.services.async_register(
-            DOMAIN,
-            _SVC_REFRESH_TITLES,
-            handle_refresh_titles,
-            schema=_REFRESH_TITLES_SCHEMA,
-        )
-
-    if not g["views_registered"]:
-        hass.http.register_view(PS4FTPDownloadView())
-        hass.http.register_view(PS4FTPUploadView())
-        g["views_registered"] = True
+    initial_data: dict[str, Any] = {
+        **klog_data,
+        "ftp_reachable": False,
+    }
+    coordinator.async_set_updated_data(initial_data)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _register_services_once(hass)
 
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    klog_task = hass.loop.create_task(
+        _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator)
+    )
+    titles_task = hass.loop.create_task(
+        _titles_refresh_task(hass, entry.entry_id, coordinator)
+    )
+    ftp_task = hass.loop.create_task(
+        _ftp_poll_task(hass, entry.entry_id, coordinator)
+    )
+
+    entry_data["klog_task"] = klog_task
+    entry_data["titles_task"] = titles_task
+    entry_data["ftp_task"] = ftp_task
 
     return True
 
 
-class PS4FTPDownloadView(HomeAssistantView):
-    url = "/api/ps4_goldhen/ftp/download"
-    name = "api:ps4_goldhen:ftp_download"
-    requires_auth = True
+async def _ftp_poll_task(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    while True:
+        await asyncio.sleep(_FTP_POLL_INTERVAL.total_seconds())
 
-    async def get(self, request: web.Request) -> web.Response:
-        entry_id = request.query.get("entry_id")
-        path = request.query.get("path")
+        entry_data = hass.data[DOMAIN].get(entry_id)
+        if not entry_data:
+            return
 
-        if not entry_id or not path:
-            return web.Response(text="Missing entry_id or path", status=400)
+        host = entry_data["host"]
+        ftp_port = entry_data["ftp_port"]
 
-        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
-        if not data:
-            return web.Response(text="Entry not found", status=404)
-
-        def _get_file():
-            buffer = io.BytesIO()
-            with ftplib.FTP() as ftp:
-                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
-                ftp.login()
-                ftp.retrbinary(f"RETR {path}", buffer.write)
-            return buffer.getvalue()
-
+        reachable = False
         try:
-            content = await request.app["hass"].async_add_executor_job(_get_file)
-            return web.Response(
-                body=content,
-                content_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
-            )
-        except Exception as err:
-            return web.Response(text=f"FTP Error: {err}", status=500)
-
-
-class PS4FTPUploadView(HomeAssistantView):
-    url = "/api/ps4_goldhen/ftp/upload"
-    name = "api:ps4_goldhen:ftp_upload"
-    requires_auth = True
-
-    async def post(self, request: web.Request) -> web.Response:
-        reader = await request.multipart()
-        entry_id, path, file_field = None, None, None
-
-        while True:
-            part = await reader.next()
-            if part is None:
-                break
-            if part.name == "entry_id":
-                entry_id = (await part.read(decode=True)).decode()
-            elif part.name == "path":
-                path = (await part.read(decode=True)).decode()
-            elif part.name == "file":
-                file_field = part
-                break
-
-        if not all([entry_id, path, file_field]):
-            return web.Response(text="Missing data", status=400)
-
-        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
-        if not data:
-            return web.Response(text="Entry not found", status=404)
-
-        full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
-
-        def _upload_file(content):
             with ftplib.FTP() as ftp:
-                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.connect(host, int(ftp_port), timeout=5)
                 ftp.login()
-                ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
+                reachable = True
+        except Exception:
+            pass
 
-        try:
-            await request.app["hass"].async_add_executor_job(_upload_file, await file_field.read(decode=True))
-            return web.json_response({"success": True, "path": full_dest})
-        except Exception as err:
-            return web.Response(text=f"FTP Upload Error: {err}", status=500)
-
-
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+        coordinator.async_set_updated_data(
+            {
+                **(coordinator.data or {}),
+                **entry_data["klog_data"],
+                "ftp_reachable": reachable,
+            }
+        )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    entry_data = _ensure_domain_root(hass).get(entry.entry_id)
-    if entry_data:
-        for task_key in ("klog_task", "titles_task"):
-            if entry_data.get(task_key) is not None:
-                task = entry_data[task_key]
-                task.cancel()
-                with contextlib.suppress(Exception):
-                    await asyncio.gather(task, return_exceptions=True)
+    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+
+    for task_key in ("klog_task", "titles_task", "ftp_task"):
+        task = entry_data.get(task_key)
+        if task and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        _ensure_domain_root(hass).pop(entry.entry_id, None)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
 
     return unload_ok
+
+
+def _register_services_once(hass: HomeAssistant) -> None:
+    g = _global(hass)
+    if g["services_registered"]:
+        return
+    g["services_registered"] = True
+
+    async def handle_send_payload(call: ServiceCall) -> None:
+        entry_id = call.data.get("entry_id")
+        filename = call.data.get("filename")
+
+        if not filename:
+            raise HomeAssistantError("filename is required")
+
+        target_entry_id = entry_id
+        if not target_entry_id:
+            for eid, edata in hass.data[DOMAIN].items():
+                if eid.startswith("_"):
+                    continue
+                target_entry_id = eid
+                break
+
+        if not target_entry_id:
+            raise HomeAssistantError("No PS4 GoldHEN integration entry found")
+
+        entry_data = hass.data[DOMAIN].get(target_entry_id)
+        if not entry_data:
+            raise HomeAssistantError(f"Entry {target_entry_id} not found")
+
+        filepath = os.path.join(PAYLOAD_DIR, filename)
+        if not os.path.isfile(filepath):
+            raise HomeAssistantError(f"Payload file not found: {filepath}")
+
+        await _send_bin_tcp(
+            entry_data["host"],
+            entry_data["binloader_port"],
+            filepath,
+        )
+
+    async def handle_refresh_titles(call: ServiceCall) -> None:
+        entry_id = call.data.get("entry_id")
+
+        target_entry_id = entry_id
+        if not target_entry_id:
+            for eid in hass.data[DOMAIN]:
+                if not eid.startswith("_"):
+                    target_entry_id = eid
+                    break
+
+        if not target_entry_id:
+            raise HomeAssistantError("No PS4 GoldHEN integration entry found")
+
+        entry_data = hass.data[DOMAIN].get(target_entry_id)
+        if not entry_data:
+            raise HomeAssistantError(f"Entry {target_entry_id} not found")
+
+        coordinator = entry_data["coordinator"]
+        await _refresh_titles_cache(hass, target_entry_id, coordinator)
+
+    hass.services.async_register(
+        DOMAIN,
+        _SVC_SEND_PAYLOAD,
+        handle_send_payload,
+        schema=vol.Schema(
+            {
+                vol.Optional("entry_id"): str,
+                vol.Required("filename"): str,
+            }
+        ),
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        _SVC_REFRESH_TITLES,
+        handle_refresh_titles,
+        schema=vol.Schema({vol.Optional("entry_id"): str}),
+    )
+
+
+def _register_http_views_once(hass: HomeAssistant) -> None:
+    g = _global(hass)
+    if g["views_registered"]:
+        return
+    g["views_registered"] = True
+
+    class PayloadListView(HomeAssistantView):
+        url = "/api/ps4_goldhen/payloads"
+        name = "api:ps4_goldhen:payloads"
+        requires_auth = True
+
+        async def get(self, request):
+            items = await hass.async_add_executor_job(
+                _list_payloads_blocking, PAYLOAD_DIR
+            )
+            return web.Response(
+                text=json.dumps(items),
+                content_type="application/json",
+            )
+
+    class PayloadUploadView(HomeAssistantView):
+        url = "/api/ps4_goldhen/payloads/upload"
+        name = "api:ps4_goldhen:payloads:upload"
+        requires_auth = True
+
+        async def post(self, request):
+            reader = await request.multipart()
+            field = await reader.next()
+
+            if not field or field.name != "file":
+                return web.Response(status=400, text="Expected file field")
+
+            filename = field.filename or "unknown.bin"
+            safe_name = os.path.basename(filename)
+
+            if not (safe_name.lower().endswith(".bin") or safe_name.lower().endswith(".elf")):
+                return web.Response(status=400, text="Only .bin or .elf files are allowed")
+
+            os.makedirs(PAYLOAD_DIR, exist_ok=True)
+            dest = os.path.join(PAYLOAD_DIR, safe_name)
+
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = await field.read_chunk()
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+            return web.Response(
+                text=json.dumps({"ok": True, "filename": safe_name}),
+                content_type="application/json",
+            )
+
+    class TitleMapView(HomeAssistantView):
+        url = "/api/ps4_goldhen/titles"
+        name = "api:ps4_goldhen:titles"
+        requires_auth = True
+
+        async def get(self, request):
+            merged: dict[str, Any] = {}
+            for eid, edata in hass.data[DOMAIN].items():
+                if eid.startswith("_") or not isinstance(edata, dict):
+                    continue
+                for tid, info in edata.get("title_map", {}).items():
+                    if tid not in merged:
+                        merged[tid] = info
+
+            return web.Response(
+                text=json.dumps(merged, ensure_ascii=False),
+                content_type="application/json",
+            )
+
+    hass.http.register_view(PayloadListView)
+    hass.http.register_view(PayloadUploadView)
+    hass.http.register_view(TitleMapView)
+
+
+def _register_websocket_handlers_once(hass: HomeAssistant) -> None:
+    g = _global(hass)
+    if g["ws_registered"]:
+        return
+    g["ws_registered"] = True
+
+    @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/state"})
+    @websocket_api.async_response
+    async def ws_state(hass: HomeAssistant, connection, msg):
+        result = {}
+        for eid, edata in hass.data[DOMAIN].items():
+            if eid.startswith("_") or not isinstance(edata, dict):
+                continue
+            coordinator = edata.get("coordinator")
+            result[eid] = {
+                "klog_data": edata.get("klog_data", {}),
+                "coordinator_data": coordinator.data if coordinator else {},
+                "title_map_count": len(edata.get("title_map", {})),
+            }
+        connection.send_result(msg["id"], result)
+
+    @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/payloads"})
+    @websocket_api.async_response
+    async def ws_payloads(hass: HomeAssistant, connection, msg):
+        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
+        connection.send_result(msg["id"], {"payloads": items})
+
+    @websocket_api.websocket_command(
+        {
+            vol.Required("type"): f"{DOMAIN}/send_payload",
+            vol.Required("filename"): str,
+            vol.Optional("entry_id"): str,
+        }
+    )
+    @websocket_api.async_response
+    async def ws_send_payload(hass: HomeAssistant, connection, msg):
+        filename = msg["filename"]
+        entry_id = msg.get("entry_id")
+
+        target_eid = entry_id
+        if not target_eid:
+            for eid in hass.data[DOMAIN]:
+                if not eid.startswith("_"):
+                    target_eid = eid
+                    break
+
+        if not target_eid or target_eid not in hass.data[DOMAIN]:
+            connection.send_error(msg["id"], "not_found", "No PS4 entry found")
+            return
+
+        edata = hass.data[DOMAIN][target_eid]
+        filepath = os.path.join(PAYLOAD_DIR, filename)
+
+        if not os.path.isfile(filepath):
+            connection.send_error(msg["id"], "not_found", f"Payload not found: {filename}")
+            return
+
+        try:
+            await _send_bin_tcp(edata["host"], edata["binloader_port"], filepath)
+            connection.send_result(msg["id"], {"ok": True})
+        except HomeAssistantError as err:
+            connection.send_error(msg["id"], "send_failed", str(err))
+
+    websocket_api.async_register_command(hass, ws_state)
+    websocket_api.async_register_command(hass, ws_payloads)
+    websocket_api.async_register_command(hass, ws_send_payload)
