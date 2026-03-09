@@ -43,10 +43,8 @@ from .const import (
     DEFAULT_RPI_PORT,
     DEFAULT_KLOG_PORT,
     PAYLOAD_DIR,
-    TCP_PROBE_TIMEOUT,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,432 +62,123 @@ _PANEL_WEBCOMPONENT = "ps4-goldhen-panel"
 
 _JS_STATIC_URL = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
 _JS_MODULE_URL = f"{_JS_STATIC_URL}?v=1.0.0"
-_LOGO_STATIC_URL = "/api/ps4_goldhen/frontend/goldhen_logo.png"
-_PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
-
-_BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
 _HOME_SCREEN_STATE = "PlayStation Home Screen"
-_IDLE_STATE = "Idle"
 _HOME_SCREEN_APP_ID = "NPXS20001"
-
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
 
-# ── Primary signals ────────────────────────────────────────────────────────────
-_KLOG_SL_FOCUS_PATTERN = re.compile(
-    r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
-    re.IGNORECASE,
-)
+# ── Klog Patterns ───────────────────────────────────────────────────────────
+_KLOG_SL_FOCUS_PATTERN = re.compile(r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]", re.IGNORECASE)
+_KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
-_KLOG_LNC_LAUNCH_PATTERN = re.compile(
-    r"\[SceLncService\]\s+launchApp\(([A-Z]{4}\d{5})\)",
-    re.IGNORECASE,
-)
-
-_KLOG_BGFT_GAME_START = re.compile(
-    r"\[BGFT\].*GameWillStart\(([A-Z]{4}\d{5}),",
-    re.IGNORECASE,
-)
-
-_KLOG_GAME_CLOSE_PATTERN = re.compile(r"Game Close detected", re.IGNORECASE)
-_KLOG_BGFT_GAME_STOPPED = re.compile(
-    r"\[BGFT\].*GameStopped\(([A-Z]{4}\d{5}),",
-    re.IGNORECASE,
-)
-
-_KLOG_EXIT_TO_HOME_PATTERN = re.compile(
-    r"OnFocusActiveSceneChanged\s+\[ApplicationExitScene\s*:\s*ApplicationExitScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
-    re.IGNORECASE,
-)
-
-# ── Noise filter ───────────────────────────────────────────────────────────────
 _KLOG_NOISE_PATTERNS = (
     re.compile(r"\bD88391\b", re.IGNORECASE),
-    re.compile(r"\bfrom tbl_appbrowse_", re.IGNORECASE),
-    re.compile(r"\bfrom tblappbrowse", re.IGNORECASE),
-    re.compile(r"^\s*<\d+>\s*=+ bindValue", re.IGNORECASE),
-    re.compile(r"^\s*<\d+>\s*=+ sql\s*=", re.IGNORECASE),
-    re.compile(r"^\s*======== sql\s*=", re.IGNORECASE),
-    re.compile(r"^\s*======== bindValue", re.IGNORECASE),
-    re.compile(r"^\s*======== limit\s*=", re.IGNORECASE),
     re.compile(r"uhub\d+: giving up port", re.IGNORECASE),
 )
 
-_KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-
-_APP_DB_CANDIDATES = (
-    "/system_data/priv/mms/app.db",
-    "/system_data/priv/mms/app.db.bak",
-)
-
-
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     hass.data.setdefault(DOMAIN, {})
-    root: dict[str, Any] = hass.data[DOMAIN]
-    root.setdefault("_global", {})
-    g: dict[str, Any] = root["_global"]
-    g.setdefault("panel_registered", False)
-    g.setdefault("frontend_registered", False)
-    g.setdefault("ws_registered", False)
-    g.setdefault("bundled_payloads_installed", False)
-    g.setdefault("services_registered", False)
-    g.setdefault("views_registered", False)
+    root = hass.data[DOMAIN]
+    root.setdefault("_global", {"panel_registered": False, "frontend_registered": False, "ws_registered": False, "services_registered": False, "views_registered": False})
     return root
 
-
 def _global(hass: HomeAssistant) -> dict[str, Any]:
-    root = _ensure_domain_root(hass)
-    return root["_global"]
-
-
-def _titles_file_path(hass: HomeAssistant) -> str:
-    return hass.config.path(f"{DOMAIN}_titles.json")
-
-
-def _copy_bundled_payloads_to_config() -> int:
-    src_dir = Path(__file__).parent / _BUNDLED_PAYLOADS_DIRNAME
-    dst_dir = Path(PAYLOAD_DIR)
-
-    if not src_dir.exists() or not src_dir.is_dir():
-        return 0
-
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    copied = 0
-
-    for p in sorted(src_dir.iterdir()):
-        if not p.is_file() or p.suffix.lower() not in (".bin", ".elf"):
-            continue
-        dst = dst_dir / p.name
-        if dst.exists():
-            continue
-        shutil.copy2(str(p), str(dst))
-        copied += 1
-
-    return copied
-
-
-def _list_payloads_blocking(payload_dir: str) -> list[str]:
-    p = Path(payload_dir)
-    p.mkdir(parents=True, exist_ok=True)
-    items: list[str] = []
-    hidden = {"linux.bin"}
-
-    for entry in sorted(p.iterdir(), key=lambda e: e.name):
-        name = entry.name
-        if name.lower() in hidden:
-            continue
-        if entry.is_file() and (name.lower().endswith(".bin") or name.lower().endswith(".elf")):
-            items.append(name)
-
-    return items
-
-
-def _normalize_title_id(value: str | None) -> str | None:
-    if not value:
-        return None
-    value = value.strip().upper()
-    if _TITLE_ID_RE.fullmatch(value):
-        return value
-    return None
-
-
-def _normalize_title_map(raw_map: Any) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    if not isinstance(raw_map, dict):
-        return out
-    for key, value in raw_map.items():
-        title_id = _normalize_title_id(str(key))
-        if not title_id:
-            continue
-        if isinstance(value, str):
-            name = value.strip()
-            if not name:
-                continue
-            out[title_id] = {"name": name, "source": "manual"}
-            continue
-        if not isinstance(value, dict):
-            continue
-        name = str(value.get("name", "")).strip()
-        if not name:
-            continue
-        item = dict(value)
-        item["name"] = name
-        item["source"] = str(item.get("source", "manual")).strip() or "manual"
-        out[title_id] = item
-    return out
-
-
-def _load_title_map_blocking(file_path: str) -> dict[str, dict[str, Any]]:
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception as err:
-        _LOGGER.warning("Unable to read title map %s: %s", file_path, err)
-        return {}
-    return _normalize_title_map(raw)
-
-
-def _save_title_map_blocking(file_path: str, title_map: dict[str, dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(dict(sorted(title_map.items())), f, indent=2, ensure_ascii=False)
-
-
-def _merge_title_maps(
-    discovered: dict[str, dict[str, Any]],
-    persisted: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    merged = dict(discovered)
-    for title_id, item in persisted.items():
-        existing = merged.get(title_id, {})
-        merged[title_id] = {**existing, **item}
-    return dict(sorted(merged.items()))
-
-
-def _ftp_read_file(ftp: ftplib.FTP, remote_path: str) -> bytes:
-    buffer = io.BytesIO()
-    ftp.retrbinary(f"RETR {remote_path}", buffer.write)
-    return buffer.getvalue()
-
-
-def _download_app_db_bytes(host: str, port: int) -> tuple[str, bytes]:
-    last_error: Exception | None = None
-    with ftplib.FTP() as ftp:
-        ftp.connect(host, int(port), timeout=20)
-        ftp.login()
-        for candidate in _APP_DB_CANDIDATES:
-            try:
-                db_bytes = _ftp_read_file(ftp, candidate)
-                if db_bytes:
-                    return candidate, db_bytes
-            except Exception as err:
-                last_error = err
-    if last_error:
-        raise last_error
-    raise FileNotFoundError("Unable to download app.db from PS4 FTP")
-
-
-def _sqlite_escape_ident(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> dict[str, str]:
-    escaped = _sqlite_escape_ident(table_name)
-    rows = conn.execute(f"PRAGMA table_info({escaped})").fetchall()
-    mapping: dict[str, str] = {}
-    for row in rows:
-        col_name = str(row[1])
-        mapping[col_name.lower()] = col_name
-    return mapping
-
-
-def _list_appbrowse_tables(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' "
-        "AND (lower(name) LIKE 'tblappbrowse%' OR lower(name) LIKE 'tbl_appbrowse%') "
-        "ORDER BY name"
-    ).fetchall()
-    return [str(row[0]) for row in rows if row and row[0]]
-
-
-def _build_select_for_appbrowse_table(table_name: str, columns: dict[str, str]) -> str | None:
-    required = {"titleid", "titlename"}
-    if not required.issubset(columns):
-        return None
-    aliases = {
-        "titleid": "titleId", "titlename": "titleName", "metadatapath": "metaDataPath",
-        "thumbnailurl": "thumbnailUrl", "hddlocation": "hddLocation",
-        "externalhddappstatus": "externalHddAppStatus", "contentid": "contentId",
-        "contenttype": "contentType", "category": "category", "pathinfo": "pathInfo",
-        "visible": "visible",
-    }
-    select_parts = [f'{_sqlite_escape_ident(columns[k])} AS "{v}"' for k, v in aliases.items() if k in columns]
-    if not select_parts: return None
-    sql = f"SELECT {', '.join(select_parts)} FROM {_sqlite_escape_ident(table_name)}"
-    if "visible" in columns:
-        sql += f" WHERE {_sqlite_escape_ident(columns['visible'])} = 1"
-    return sql
-
-
-def _extract_title_map_from_app_db_bytes(db_bytes: bytes, db_path: str) -> dict[str, dict[str, Any]]:
-    title_map: dict[str, dict[str, Any]] = {}
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(prefix="ps4_goldhen_appdb_", suffix=".db", delete=False) as tmp:
-            tmp.write(db_bytes)
-            temp_path = tmp.name
-        conn = sqlite3.connect(temp_path)
-        try:
-            conn.row_factory = sqlite3.Row
-            tables = _list_appbrowse_tables(conn)
-            for table_name in tables:
-                columns = _sqlite_table_columns(conn, table_name)
-                query = _build_select_for_appbrowse_table(table_name, columns)
-                if not query: continue
-                rows = conn.execute(query).fetchall()
-                for row in rows:
-                    title_id = _normalize_title_id(row["titleId"] if "titleId" in row.keys() else None)
-                    title_name = str(row["titleName"]).strip() if "titleName" in row.keys() and row["titleName"] is not None else ""
-                    if not title_id or not title_name: continue
-                    item = {"name": title_name, "source": "ps4_app_db", "db_path": db_path, "db_table": table_name, "last_seen": int(time.time())}
-                    for key in ("metaDataPath", "thumbnailUrl", "hddLocation", "externalHddAppStatus", "contentId", "contentType", "category", "pathInfo"):
-                        if key in row.keys() and row[key] is not None:
-                            item[key] = row[key]
-                    existing = title_map.get(title_id)
-                    if existing:
-                        if existing.get("source") != "manual":
-                            title_map[title_id] = {**existing, **item}
-                    else:
-                        title_map[title_id] = item
-        finally:
-            conn.close()
-    finally:
-        if temp_path:
-            with contextlib.suppress(Exception):
-                os.unlink(temp_path)
-    return title_map
-
-
-def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]:
-    db_path, db_bytes = _download_app_db_bytes(host, port)
-    return _extract_title_map_from_app_db_bytes(db_bytes, db_path)
-
-
-async def _refresh_titles_cache(hass: HomeAssistant, entry_id: str, coordinator: DataUpdateCoordinator) -> None:
-    entry_data = hass.data[DOMAIN].get(entry_id)
-    if not entry_data: return
-    file_path = entry_data["titles_file"]
-    persisted = await hass.async_add_executor_job(_load_title_map_blocking, file_path)
-    discovered: dict[str, dict[str, Any]] = {}
-    try:
-        discovered = await hass.async_add_executor_job(_build_title_map_from_ps4, entry_data["host"], entry_data["ftp_port"])
-    except Exception as err:
-        _LOGGER.warning("Failed refreshing title map: %s", err)
-    merged = _merge_title_maps(discovered, persisted)
-    await hass.async_add_executor_job(_save_title_map_blocking, file_path, merged)
-    entry_data["title_map"] = merged
-    entry_data["title_map_updated_at"] = int(time.time())
-    coordinator.async_set_updated_data({**(coordinator.data or {}), **entry_data["klog_data"], "title_map_updated_at": entry_data["title_map_updated_at"]})
-
-
-async def _titles_refresh_task(hass: HomeAssistant, entry_id: str, coordinator: DataUpdateCoordinator) -> None:
-    while True:
-        try:
-            await _refresh_titles_cache(hass, entry_id, coordinator)
-        except asyncio.CancelledError: raise
-        except Exception as err: _LOGGER.warning("Title refresh task error: %s", err)
-        await asyncio.sleep(_TITLES_REFRESH_INTERVAL.total_seconds())
-
-
-async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
-    g = _global(hass)
-    if not g["frontend_registered"]:
-        payload_icons_dir = hass.config.path(f"custom_components/{DOMAIN}/frontend/payload_icons")
-        await hass.async_add_executor_job(partial(os.makedirs, payload_icons_dir, exist_ok=True))
-        await hass.http.async_register_static_paths([
-            StaticPathConfig(_JS_STATIC_URL, hass.config.path(f"custom_components/{DOMAIN}/frontend/ps4-goldhen-panel.js"), False),
-            StaticPathConfig(_LOGO_STATIC_URL, hass.config.path(f"custom_components/{DOMAIN}/frontend/goldhen_logo.png"), False),
-            StaticPathConfig(_PAYLOAD_ICONS_STATIC_URL, payload_icons_dir, False),
-        ])
-        g["frontend_registered"] = True
-    if not g["panel_registered"]:
-        await panel_custom.async_register_panel(hass, frontend_url_path=_PANEL_URL_PATH, webcomponent_name=_PANEL_WEBCOMPONENT, module_url=_JS_MODULE_URL, sidebar_title=_PANEL_SIDEBAR_TITLE, sidebar_icon=_PANEL_SIDEBAR_ICON, config={}, require_admin=False)
-        g["panel_registered"] = True
-
-
-async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
-    loop = asyncio.get_running_loop()
-    try:
-        data = await loop.run_in_executor(None, lambda: open(filepath, "rb").read())
-    except Exception as err: raise HomeAssistantError(f"Cannot read payload file: {err}") from err
-    try:
-        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-        writer.write(data)
-        await asyncio.wait_for(writer.drain(), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-    except Exception as err: raise HomeAssistantError(f"Connection to PS4 BinLoader failed: {err}") from err
-
-
-def _is_real_game_title_id(value: str | None) -> bool:
-    if not value: return False
-    value = value.strip().upper()
-    return bool(_TITLE_ID_RE.fullmatch(value)) and not value.startswith("NPXS")
-
+    return _ensure_domain_root(hass)["_global"]
 
 class KlogStateMachine:
     def __init__(self) -> None:
         self.current_title_id: str | None = None
-        self.last_reason = "init"
-        self.last_signal_line = ""
-        self.recent_lines: deque[str] = deque(maxlen=250)
         self.klog_connected: bool = True
-        self._pending_launch: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         state = self.current_title_id if self.current_title_id else _HOME_SCREEN_STATE
-        return {SENSOR_CURRENT_GAME: state, "title_id": self.current_title_id, "state_reason": self.last_reason, "state_signal_line": self.last_signal_line, "pending_title_id": self._pending_launch, "klog_connected": self.klog_connected}
+        return {SENSOR_CURRENT_GAME: state, "title_id": self.current_title_id, "klog_connected": self.klog_connected}
 
     def ingest(self, line: str) -> bool:
-        self.recent_lines.append(line[-300:])
-        self.klog_connected = True
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line): return False
+        
         m = _KLOG_SL_FOCUS_PATTERN.search(line)
         if m:
             new_app = m.group(2).strip().upper()
-            if _is_real_game_title_id(new_app): return self._set(new_app, "sl_focus_game", line)
-            elif new_app == _HOME_SCREEN_APP_ID:
-                if self.current_title_id is not None: return self._set(None, "sl_focus_home", line)
-            return False
-        m = _KLOG_BGFT_GAME_START.search(line)
-        if m:
-            tid = m.group(1).strip().upper()
-            if _is_real_game_title_id(tid):
-                self._pending_launch = tid
-                return self._set(tid, "bgft_game_will_start", line)
-        m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
-        if m:
-            tid = m.group(1).strip().upper()
-            if _is_real_game_title_id(tid):
-                self._pending_launch = tid
-                self.last_reason = "lnc_launch_pending"
-                self.last_signal_line = line[-300:]
-                return False
-        if _KLOG_GAME_CLOSE_PATTERN.search(line):
-            if self.current_title_id is not None: return self._set(None, "game_close_detected", line)
-        m = _KLOG_BGFT_GAME_STOPPED.search(line)
-        if m:
-            tid = m.group(1).strip().upper()
-            if self.current_title_id == tid: return self._set(None, "bgft_game_stopped", line)
-        if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
-            if self.current_title_id is not None: return self._set(None, "exit_scene_to_home", line)
+            changed = self.current_title_id != (None if new_app == _HOME_SCREEN_APP_ID else new_app)
+            self.current_title_id = None if new_app == _HOME_SCREEN_APP_ID else new_app
+            return changed
         return False
 
-    def _set(self, title_id: str | None, reason: str, line: str) -> bool:
-        changed = self.current_title_id != title_id
-        self.current_title_id = title_id
-        self._pending_launch = None
-        self.last_reason = reason
-        self.last_signal_line = line[-300:]
-        return changed
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    root = _ensure_domain_root(hass)
+    
+    # Extract data using the keys from your const.py
+    host = entry.data[CONF_PS4_HOST]
+    klog_port = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
+    
+    klog_state_machine = KlogStateMachine()
+    coordinator = DataUpdateCoordinator(hass, _LOGGER, name=f"{DOMAIN}_{entry.entry_id}", update_interval=_FTP_POLL_INTERVAL)
+    
+    entry_data = {
+        "host": host,
+        "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
+        "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
+        "klog_state_machine": klog_state_machine,
+        "klog_data": {**klog_state_machine.snapshot(), SENSOR_CPU_TEMP: None},
+        "coordinator": coordinator
+    }
+    root[entry.entry_id] = entry_data
 
+    await _register_frontend_and_panel_once(hass)
+    _register_websocket_handlers_once(hass)
+    _register_http_views_once(hass)
+    _register_services_once(hass)
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    
+    entry_data["klog_task"] = hass.loop.create_task(_klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator))
+    return True
+
+async def _klog_listener_task(hass: HomeAssistant, entry_id: str, host: str, port: int, coordinator: DataUpdateCoordinator) -> None:
+    while True:
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
+            entry_data = hass.data[DOMAIN].get(entry_id)
+            if not entry_data: break
+            
+            entry_data["klog_state_machine"].klog_connected = True
+            text_buffer = ""
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk: break
+                text_buffer += chunk.decode("utf-8", errors="replace")
+                lines = text_buffer.split("\n")
+                text_buffer = lines[-1]
+                
+                changed = False
+                for line in lines[:-1]:
+                    if _parse_klog_line(line, entry_data): changed = True
+                
+                if changed: 
+                    coordinator.async_set_updated_data({**entry_data["klog_data"]})
+            
+            writer.close()
+            await writer.wait_closed()
+        except Exception as err:
+            _LOGGER.debug("Klog connection lost: %s", err)
+        
+        await asyncio.sleep(10)
 
 def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
-    state_machine: KlogStateMachine = entry_data["klog_state_machine"]
-    state_changed = state_machine.ingest(line)
+    state_machine = entry_data["klog_state_machine"]
+    changed = state_machine.ingest(line)
+    
     klog_data = entry_data["klog_data"]
     klog_data.update(state_machine.snapshot())
+    
     m = _KLOG_CPU_TEMP_PATTERN.search(line)
     if m:
-        with contextlib.suppress(ValueError): klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
-    m = _KLOG_RSX_TEMP_PATTERN.search(line)
-    if m:
-        with contextlib.suppress(ValueError): klog_data[SENSOR_RSX_TEMP] = float(m.group(1))
-    return state_changed
+        with contextlib.suppress(ValueError):
+            klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
+            changed = True
+    return changed
 
 
 async def _klog_listener_task(hass: HomeAssistant, entry_id: str, host: str, port: int, coordinator: DataUpdateCoordinator) -> None:
@@ -536,7 +225,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     titles_file = hass.config.path(f"{DOMAIN}_{entry.entry_id}_titles.json")
     persisted_title_map = await hass.async_add_executor_job(_load_title_map_blocking, titles_file)
     klog_state_machine = KlogStateMachine()
-    klog_data = {**klog_state_machine.snapshot(), SENSOR_CPU_TEMP: None, SENSOR_RSX_TEMP: None}
+    klog_data = {**klog_state_machine.snapshot(), SENSOR_CPU_TEMP: None}
     coordinator = DataUpdateCoordinator(hass, _LOGGER, name=f"{DOMAIN}_{entry.entry_id}", update_interval=_FTP_POLL_INTERVAL)
     entry_data = {"host": host, "binloader_port": binloader_port, "ftp_port": ftp_port, "rpi_port": rpi_port, "klog_port": klog_port, "titles_file": titles_file, "title_map": persisted_title_map, "title_map_updated_at": 0, "klog_state_machine": klog_state_machine, "klog_data": klog_data, "coordinator": coordinator}
     root[entry.entry_id] = entry_data
