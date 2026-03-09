@@ -96,6 +96,7 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
             "state_signal_line": data.get("state_signal_line"),
             "pending_title_id": data.get("pending_title_id"),
             "pending_reason": data.get("pending_reason"),
+            "klog_connected": data.get("klog_connected", False),  # ADDED THIS LINE
         }
 
 
