@@ -1,4 +1,4 @@
-"""PS4 GoldHEN sensors: FTP status, current game, CPU/RSX temps from klog."""
+"""PS4 GoldHEN sensors: FTP status, current game, CPU/SOC temp from klog."""
 from __future__ import annotations
 from typing import Any
 
@@ -14,7 +14,6 @@ from .const import (
     CONF_PS4_HOST,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
 )
 
 
@@ -28,7 +27,6 @@ async def async_setup_entry(
         PS4FTPStatusSensor(coordinator, entry),
         PS4CurrentGameSensor(coordinator, entry),
         PS4CPUTempSensor(coordinator, entry),
-        PS4RSXTempSensor(coordinator, entry),
     ])
 
 
@@ -69,7 +67,7 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
 
 class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
-    """CPU temperature sensor (parsed from klog)."""
+    """CPU/SOC temperature sensor (parsed from klog)."""
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
@@ -86,25 +84,4 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
-        return float(temp) if temp is not None else None
-
-
-class PS4RSXTempSensor(CoordinatorEntity, SensorEntity):
-    """RSX (GPU) temperature sensor (parsed from klog)."""
-    _attr_has_entity_name = True
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_icon = "mdi:thermometer"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        host = entry.data[CONF_PS4_HOST]
-        self._attr_unique_id = f"{DOMAIN}_{host}_rsx_temp"
-        self._attr_name = "RSX Temperature"
-
-    @property
-    def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
-        temp = data.get(SENSOR_RSX_TEMP)
         return float(temp) if temp is not None else None
