@@ -1,7 +1,7 @@
-"""PS4 GoldHEN sensors: FTP status, current game, CPU/SOC temp from klog."""
+"""PS4 GoldHEN sensors."""
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -13,10 +13,8 @@ from .const import (
     CONF_PS4_HOST,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
+    SENSOR_RSX_TEMP,
 )
-
-# Optional future key from coordinator; does not require const.py change
-SENSOR_CURRENT_GAME_TITLE = "current_game_title"
 
 
 async def async_setup_entry(
@@ -25,11 +23,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+
     async_add_entities(
         [
             PS4FTPStatusSensor(coordinator, entry),
             PS4CurrentGameSensor(coordinator, entry),
             PS4CPUTempSensor(coordinator, entry),
+            PS4RSXTempSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -37,14 +37,15 @@ async def async_setup_entry(
 
 class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
     """FTP reachability sensor."""
+
     _attr_has_entity_name = True
+    _attr_name = "FTP Status"
     _attr_icon = "mdi:sony-playstation"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         host = entry.data[CONF_PS4_HOST]
         self._attr_unique_id = f"{DOMAIN}_{host}_ftp_status"
-        self._attr_name = "FTP Status"
 
     @property
     def native_value(self) -> str:
@@ -53,48 +54,40 @@ class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
 
 
 class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
-    """Current game sensor driven only by coordinator data."""
+    """Current game sensor."""
+
     _attr_has_entity_name = True
+    _attr_name = "Current Game"
     _attr_icon = "mdi:gamepad-variant"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         host = entry.data[CONF_PS4_HOST]
         self._attr_unique_id = f"{DOMAIN}_{host}_current_game"
-        self._attr_name = "Current Game"
 
     @property
     def native_value(self) -> str:
         data = self.coordinator.data or {}
+        value = data.get(SENSOR_CURRENT_GAME)
 
-        # Prefer resolved/local title from coordinator if it exists later
-        title = data.get(SENSOR_CURRENT_GAME_TITLE)
-        if isinstance(title, str) and title.strip():
-            return title.strip()
-
-        # Otherwise always fall back to raw game/app id
-        game = data.get(SENSOR_CURRENT_GAME)
-        if isinstance(game, str) and game.strip():
-            return game.strip()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
 
         return "Idle"
 
     @property
     def extra_state_attributes(self) -> dict:
-        data = self.coordinator.data or {}
-        raw_id = data.get(SENSOR_CURRENT_GAME)
-        title = data.get(SENSOR_CURRENT_GAME_TITLE)
-
+        value = self.native_value
         return {
-            "title_id": raw_id if isinstance(raw_id, str) and raw_id.strip() else None,
-            "resolved_title": title if isinstance(title, str) and title.strip() else None,
-            "ps4_host": self._attr_unique_id.split("_")[1] if "_" in self._attr_unique_id else None,
+            "title_id": value if value != "Idle" else None,
         }
 
 
 class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
-    """CPU/SOC temperature sensor (parsed from coordinator)."""
+    """CPU temperature sensor."""
+
     _attr_has_entity_name = True
+    _attr_name = "CPU Temperature"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _attr_icon = "mdi:thermometer"
@@ -103,10 +96,30 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         host = entry.data[CONF_PS4_HOST]
         self._attr_unique_id = f"{DOMAIN}_{host}_cpu_temp"
-        self._attr_name = "CPU Temperature"
 
     @property
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
+        return float(temp) if temp is not None else None
+
+
+class PS4RSXTempSensor(CoordinatorEntity, SensorEntity):
+    """RSX/GPU temperature sensor."""
+
+    _attr_has_entity_name = True
+    _attr_name = "RSX Temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        host = entry.data[CONF_PS4_HOST]
+        self._attr_unique_id = f"{DOMAIN}_{host}_rsx_temp"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        temp = data.get(SENSOR_RSX_TEMP)
         return float(temp) if temp is not None else None
