@@ -589,8 +589,6 @@ class KlogStateMachine:
         self.current_state = _HOME_SCREEN_STATE
         self.last_reason = "init"
         self.last_signal_line = ""
-        self.last_real_game: str | None = None
-        self.last_real_game_time = 0.0
         self.recent_lines: deque[str] = deque(maxlen=250)
 
     def snapshot(self) -> dict[str, Any]:
@@ -611,20 +609,7 @@ class KlogStateMachine:
         self.current_state = state
         self.last_reason = reason
         self.last_signal_line = line[-300:]
-
-        # Track last real game and timestamp
-        if _is_real_game_title_id(state):
-            self.last_real_game = state
-            self.last_real_game_time = time.monotonic()
-
         return changed
-
-    def _should_ignore_home_transition(self) -> bool:
-        """Ignore Home transitions for 20 seconds after seeing a real game."""
-        if not self.last_real_game:
-            return False
-        elapsed = time.monotonic() - self.last_real_game_time
-        return elapsed < 20.0
 
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
@@ -632,7 +617,6 @@ class KlogStateMachine:
         # Check for idle/power mode changes
         for pattern in _KLOG_IDLE_PATTERNS:
             if pattern.search(line):
-                self.last_real_game = None
                 return self._set_state(_IDLE_STATE, "power_idle", line)
 
         # Filter out known noisy patterns
@@ -640,28 +624,27 @@ class KlogStateMachine:
             if pattern.search(line):
                 return False
 
-        # AppFocusChanged pattern
+        # PRIORITY 1: Detect launchApp - this is the PRIMARY game launch signal
+        for pattern in _KLOG_LAUNCH_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                title_id = match.group(1).strip().upper()
+                if _is_real_game_title_id(title_id):
+                    return self._set_state(title_id, "launch_detected", line)
+
+        # PRIORITY 2: AppFocusChanged pattern (mainly for going back home)
         match = _KLOG_FOCUS_PATTERN.search(line)
         if match:
             old_app = match.group(1).strip().upper()
             new_app = match.group(2).strip().upper()
 
-            # Real game title ID: immediately commit
+            # Real game title ID: commit
             if _is_real_game_title_id(new_app):
                 return self._set_state(new_app, "focus_to_game", line)
 
-            # Home screen (NPXS20001): ignore if we just saw a game recently
-            if new_app == _HOME_SCREEN_APP_ID:
-                if self._should_ignore_home_transition():
-                    _LOGGER.debug("Ignoring NPXS20001 transition during game launch window (%.1fs since game)", 
-                                  time.monotonic() - self.last_real_game_time)
-                    return False
-                
-                # Only switch to Home if coming from a real game or non-home state
-                if _is_real_game_title_id(old_app) or self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
-                    self.last_real_game = None
-                    return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
-                return False
+            # Home screen: only if coming from a real game
+            if new_app == _HOME_SCREEN_APP_ID and _is_real_game_title_id(old_app):
+                return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
 
         # When in a game, ignore ShellUI noise
         if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
@@ -688,9 +671,9 @@ class KlogStateMachine:
                 return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
 
         # Suspend hint: return to home
-        if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
-            self.last_real_game = None
-            return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
+        if _KLOG_SUSPEND_APP_PATTERN.search(line):
+            if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+                return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home", line)
 
         return False
 
