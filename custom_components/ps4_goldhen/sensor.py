@@ -1,37 +1,33 @@
 """PS4 GoldHEN sensors: FTP status, current game, CPU/SOC temp from klog."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
-import time
+import asyncio
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
     CONF_PS4_HOST,
+    SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
 )
 from .title_resolver import PS4TitleResolver
 
 _LOGGER = logging.getLogger(__name__)
 
-# Example line from your klog:
-# <118>[SL] AppFocusChanged [NPXS20001] -> [CUSA11993]
-FOCUS_RE = re.compile(r"AppFocusChanged \[(\w+)\] -> \[(\w+)\]")
 
-
-async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     async_add_entities(
         [
             PS4FTPStatusSensor(coordinator, entry),
-            PS4CurrentGameSensor(entry),
+            PS4CurrentGameSensor(coordinator, entry),
             PS4CPUTempSensor(coordinator, entry),
         ],
         update_before_add=False,
@@ -55,27 +51,24 @@ class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
         return "online" if data.get("ftp_reachable") else "offline"
 
 
-class PS4CurrentGameSensor(SensorEntity):
-    """Current game title sensor (parsed from live klog)."""
+class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
+    """Current game title sensor (translates CUSA IDs from the coordinator)."""
     _attr_has_entity_name = True
     _attr_icon = "mdi:gamepad-variant"
-    _attr_should_poll = False
 
-    def __init__(self, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
         self._host = entry.data[CONF_PS4_HOST]
         self._attr_unique_id = f"{DOMAIN}_{self._host}_current_game"
         self._attr_name = "Current Game"
 
-        self._attr_native_value = "Idle"
-        self._monitor_task: asyncio.Task | None = None
-
         self._resolver: PS4TitleResolver | None = None
         self._current_title_id: str | None = None
+        self._resolved_name: str | None = "Idle"
+        
+        # Attributes for debugging
         self._current_source: str | None = None
         self._current_error: str | None = None
-        
-        # Track the last time we successfully read a game launch to prevent UI flapping
-        self._last_update_time = 0.0
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -83,86 +76,58 @@ class PS4CurrentGameSensor(SensorEntity):
             "title_id": self._current_title_id,
             "title_source": self._current_source,
             "title_lookup_error": self._current_error,
-            "ps4_host": self._host,
         }
 
+    @property
+    def native_value(self) -> str | None:
+        return self._resolved_name
+
     async def async_added_to_hass(self) -> None:
+        """Run when entity is about to be added."""
+        await super().async_added_to_hass()
         self._resolver = PS4TitleResolver(self.hass)
-        self._monitor_task = self.hass.loop.create_task(self._klog_monitor_loop())
+        self._update_internal_state()
 
-    async def async_will_remove_from_hass(self) -> None:
-        if self._monitor_task:
-            self._monitor_task.cancel()
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Intercept updated data from the coordinator in __init__.py."""
+        self._update_internal_state()
+        super()._handle_coordinator_update()
 
-    async def _klog_monitor_loop(self) -> None:
-        import time
-        while True:
-            writer = None
-            try:
-                # Give a tiny buffer before connecting to ensure PS4 socket is ready
-                await asyncio.sleep(0.5) 
-                reader, writer = await asyncio.open_connection(self._host, 3232)
-                _LOGGER.debug("Connected to PS4 klog at %s:3232", self._host)
+    def _update_internal_state(self) -> None:
+        """Check if the title ID changed, and resolve it without blocking."""
+        data = self.coordinator.data or {}
+        new_title_id = data.get(SENSOR_CURRENT_GAME, "Idle")
 
-                while True:
-                    line_bytes = await reader.readline()
-                    
-                    # When a game launches, the PS4 klog socket drops the connection briefly.
-                    # Instead of treating this as an error, we silently break to reconnect.
-                    if not line_bytes:
-                        _LOGGER.debug("PS4 klog stream closed by peer (typical during app switch)")
-                        break
+        # If the ID hasn't changed, do nothing
+        if new_title_id == self._current_title_id:
+            return
 
-                    line = line_bytes.decode("utf-8", errors="ignore")
-                    m = FOCUS_RE.search(line)
-                    if not m:
-                        continue
+        self._current_title_id = new_title_id
 
-                    new_app = m.group(2)
-                    self._current_title_id = new_app
+        # If __init__.py passes us a standard status word, pass it straight through
+        if not new_title_id or new_title_id in ("Disconnected", "Idle", "Unknown"):
+            self._resolved_name = new_title_id or "Idle"
+            self._current_source = None
+            self._current_error = None
+            return
 
-                    # Resolve to friendly name
-                    if self._resolver is None:
-                        resolved_name = new_app
-                        self._current_source = "resolver_missing"
-                        self._current_error = "resolver not initialized"
-                    else:
-                        res = await self._resolver.async_resolve(new_app)
-                        resolved_name = res.name or new_app
-                        self._current_source = res.source
-                        self._current_error = res.error
+        # It's a new Title ID, launch a background task to resolve the actual name
+        self.hass.loop.create_task(self._async_resolve_and_write(new_title_id))
 
-                    self._attr_native_value = resolved_name
-                    self._last_update_time = time.time()
-                    self.async_write_ha_state()
+    async def _async_resolve_and_write(self, title_id: str) -> None:
+        """Fetch the title using PS4TitleResolver and update HA state."""
+        if not self._resolver:
+            return
 
-            except asyncio.CancelledError:
-                if writer is not None:
-                    writer.close()
-                    await writer.wait_closed()
-                break
-            except Exception as err:
-                _LOGGER.debug("PS4 klog connection error: %s", err)
-                
-            finally:
-                if writer is not None:
-                    try:
-                        writer.close()
-                        await writer.wait_closed()
-                    except Exception:
-                        pass
-                
-            # If we haven't seen a game update in the last 15 seconds, and the socket 
-            # is broken, ONLY THEN do we consider the PS4 truly disconnected/offline.
-            if time.time() - self._last_update_time > 15.0:
-                self._attr_native_value = "Disconnected"
-                self._current_source = "klog_dropped"
-                self._current_error = "Connection dropped"
-                self.async_write_ha_state()
-
-            # Wait only 1 second before silently reconnecting so we catch the new game log
-            await asyncio.sleep(1)
-
+        res = await self._resolver.async_resolve(title_id)
+        
+        # Ensure the ID didn't change while we were waiting for the network
+        if self._current_title_id == title_id:
+            self._resolved_name = res.name or title_id
+            self._current_source = res.source
+            self._current_error = res.error
+            self.async_write_ha_state()
 
 
 class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
@@ -183,4 +148,3 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
         return float(temp) if temp is not None else None
-
