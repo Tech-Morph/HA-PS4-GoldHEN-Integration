@@ -80,7 +80,9 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
         value = self.native_value
+
         return {
             "title_id": value if value not in (_HOME_SCREEN_STATE, _IDLE_STATE) else None,
             "state_classification": (
@@ -90,6 +92,10 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
                 if value == _IDLE_STATE
                 else "game"
             ),
+            "state_reason": data.get("state_reason"),
+            "state_signal_line": data.get("state_signal_line"),
+            "pending_title_id": data.get("pending_title_id"),
+            "pending_reason": data.get("pending_reason"),
         }
 
 
