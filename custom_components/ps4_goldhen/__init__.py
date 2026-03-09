@@ -60,9 +60,12 @@ _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
-_TITLE_ID_RE = re.compile(r"([A-Z]{4}\d{5})")
-_KLOG_DIRECT_TITLE_PATTERNS = (
-    re.compile(r"D/88391:([A-Z]{4}\d{5})"),
+_HOME_SCREEN_STATE = "PlayStation Home Screen"
+_IDLE_STATE = "Idle"
+_HOME_SCREEN_APP_ID = "NPXS20001"
+
+_TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
+_KLOG_LAUNCH_PATTERNS = (
     re.compile(r"launchApp\(([A-Z]{4}\d{5})\)"),
     re.compile(r"GameStartBoot\(([A-Z]{4}\d{5}),"),
     re.compile(r"GameWillStart\(([A-Z]{4}\d{5}),"),
@@ -71,14 +74,26 @@ _KLOG_DIRECT_TITLE_PATTERNS = (
     re.compile(r"titleId\s*=\s*([A-Z]{4}\d{5})"),
 )
 _KLOG_FOCUS_PATTERN = re.compile(r"AppFocusChanged\s+([A-Z0-9]+)\s+-\s+([A-Z0-9]+)")
-_KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
+_KLOG_HOME_SCENE_PATTERNS = (
+    re.compile(
+        r"OnFocusActiveSceneChanged\s+AppScreen\s+ApplicationScreenScene\s+-\s+ContentAreaScene\s+ContentAreaScene",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"OnFocusActiveSceneChanged\s+\[AppScreen\s*:\s*ApplicationScreenScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
+        re.IGNORECASE,
+    ),
+)
 _KLOG_IDLE_PATTERNS = (
     re.compile(r"Power Mode Change:\s*STANDBY", re.IGNORECASE),
     re.compile(r"Power Mode Change:\s*REST", re.IGNORECASE),
     re.compile(r"Power Mode Change:\s*OFF", re.IGNORECASE),
     re.compile(r"Power Mode Change:\s*SUSPEND", re.IGNORECASE),
 )
+
+# Keep your existing temp patterns intact
+_KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
+_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -199,43 +214,56 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
 
 
 def _is_real_game_title_id(value: str | None) -> bool:
-    """Return True for real game/app title IDs, but ignore shell/system IDs like NPXS20001."""
+    """Return True for real game/app title IDs, excluding shell/system IDs."""
     if not value:
         return False
     value = value.strip().upper()
     return bool(_TITLE_ID_RE.fullmatch(value)) and not value.startswith("NPXS")
 
 
-def _set_current_game(klog_data: dict[str, Any], title_id: str | None) -> bool:
-    """Store current game only if it is a real game title ID."""
-    if not _is_real_game_title_id(title_id):
-        return False
-
-    title_id = title_id.strip().upper()
-    if klog_data.get(SENSOR_CURRENT_GAME) != title_id:
-        klog_data[SENSOR_CURRENT_GAME] = title_id
-        _LOGGER.debug("Detected current game title ID: %s", title_id)
-    return True
+def _set_current_game(klog_data: dict[str, Any], value: str) -> None:
+    """Update current game state only when it changes."""
+    if klog_data.get(SENSOR_CURRENT_GAME) != value:
+        klog_data[SENSOR_CURRENT_GAME] = value
+        _LOGGER.debug("Current game state updated to: %s", value)
 
 
 def _parse_klog_line(line: str, klog_data: dict[str, Any]) -> None:
     """Parse a single klog line and update klog_data dict."""
-    for pattern in _KLOG_DIRECT_TITLE_PATTERNS:
+
+    # Real launched/foreground game signals
+    for pattern in _KLOG_LAUNCH_PATTERNS:
         match = pattern.search(line)
         if match:
-            if _set_current_game(klog_data, match.group(1)):
-                break
+            title_id = match.group(1).strip().upper()
+            if _is_real_game_title_id(title_id):
+                _set_current_game(klog_data, title_id)
+            break
     else:
+        # Foreground app focus changes
         match = _KLOG_FOCUS_PATTERN.search(line)
         if match:
+            old_app = match.group(1).strip().upper()
             new_app = match.group(2).strip().upper()
-            _set_current_game(klog_data, new_app)
+
+            if new_app == _HOME_SCREEN_APP_ID:
+                _set_current_game(klog_data, _HOME_SCREEN_STATE)
+            elif old_app == _HOME_SCREEN_APP_ID and _is_real_game_title_id(new_app):
+                _set_current_game(klog_data, new_app)
+            elif _is_real_game_title_id(new_app):
+                _set_current_game(klog_data, new_app)
         else:
-            for idle_pattern in _KLOG_IDLE_PATTERNS:
-                if idle_pattern.search(line):
-                    klog_data[SENSOR_CURRENT_GAME] = "Idle"
-                    _LOGGER.debug("Detected idle/standby state")
+            # Explicit UI transition back to the home screen
+            for home_pattern in _KLOG_HOME_SCENE_PATTERNS:
+                if home_pattern.search(line):
+                    _set_current_game(klog_data, _HOME_SCREEN_STATE)
                     break
+            else:
+                # Standby / off / suspend
+                for idle_pattern in _KLOG_IDLE_PATTERNS:
+                    if idle_pattern.search(line):
+                        _set_current_game(klog_data, _IDLE_STATE)
+                        break
 
     match = _KLOG_CPU_TEMP_PATTERN.search(line)
     if match:
@@ -388,7 +416,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     root[entry.entry_id]["klog_data"] = {
-        SENSOR_CURRENT_GAME: "Idle",
+        SENSOR_CURRENT_GAME: _HOME_SCREEN_STATE,
         SENSOR_CPU_TEMP: None,
         SENSOR_RSX_TEMP: None,
     }
