@@ -613,84 +613,43 @@ class KlogStateMachine:
         self.last_reason = reason
         self.last_signal_line = line[-300:]
 
-        if state in (_HOME_SCREEN_STATE, _IDLE_STATE):
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
-        elif _is_real_game_title_id(state):
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
+        # Clear pending when we commit a state
+        self.pending_title_id = None
+        self.pending_reason = None
+        self.pending_expires_at = 0.0
 
         return changed
 
-    def _queue_game(self, title_id: str, reason: str, line: str) -> bool:
-        title_id = title_id.upper()
-        if not _is_real_game_title_id(title_id):
-            return False
-        self.pending_title_id = title_id
-        self.pending_reason = reason
-        self.pending_expires_at = time.monotonic() + 15.0
-        self.last_reason = reason
-        self.last_signal_line = line[-300:]
-        return False
-
-    def _pending_game_is_alive(self) -> bool:
-        return bool(self.pending_title_id) and time.monotonic() <= self.pending_expires_at
-
-    def _clear_expired_pending(self) -> None:
-        if self.pending_title_id and time.monotonic() > self.pending_expires_at:
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
-
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
-        self._clear_expired_pending()
 
+        # Check for idle/power mode changes
         for pattern in _KLOG_IDLE_PATTERNS:
             if pattern.search(line):
                 return self._set_state(_IDLE_STATE, "power_idle", line)
 
+        # Filter out known noisy patterns
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line):
                 return False
 
+        # FIXED: AppFocusChanged is authoritative and immediately commits state
         match = _KLOG_FOCUS_PATTERN.search(line)
         if match:
             old_app = match.group(1).strip().upper()
             new_app = match.group(2).strip().upper()
 
+            # Real game title ID: immediately commit
             if _is_real_game_title_id(new_app):
                 return self._set_state(new_app, "focus_to_game", line)
 
+            # Home screen: commit only if coming from a game or non-home state
             if new_app == _HOME_SCREEN_APP_ID:
                 if _is_real_game_title_id(old_app) or self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
                     return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
                 return False
 
-        for pattern in _KLOG_LAUNCH_PATTERNS:
-            match = pattern.search(line)
-            if match:
-                title_id = match.group(1).strip().upper()
-                if _is_real_game_title_id(title_id):
-                    return self._queue_game(title_id, "launch_hint", line)
-
-        if self._pending_game_is_alive():
-            if _KLOG_VCS_BIGAPP_FOCUS_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "bigapp_focus_confirmed", line)
-
-            for pattern in _KLOG_GAME_SCENE_PATTERNS:
-                if pattern.search(line):
-                    return self._set_state(self.pending_title_id, "scene_game_confirmed", line)
-
-            if _KLOG_RESUME_APP_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "resume_confirmed", line)
-
-            if _KLOG_SHELL_BG_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "shell_bg_game_confirmed", line)
-
-        # When already in a game, ignore ShellUI foreground/background chatter.
+        # When in a game, ignore ShellUI noise that happens during transitions
         if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
             if _KLOG_SHELL_FG_PATTERN.search(line):
                 return False
@@ -702,8 +661,7 @@ class KlogStateMachine:
                 if pattern.search(line):
                     return False
 
-        # Only trust these home hints when we're already home/idle,
-        # or when an explicit AppFocusChanged to NPXS20001 happened above.
+        # Home detection when already home/idle
         if self.current_state in (_HOME_SCREEN_STATE, _IDLE_STATE):
             for pattern in _KLOG_HOME_SCENE_PATTERNS:
                 if pattern.search(line):
@@ -715,6 +673,7 @@ class KlogStateMachine:
             if _KLOG_SHELL_FG_PATTERN.search(line):
                 return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
 
+        # Suspend hint: return to home
         if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
             return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
 
