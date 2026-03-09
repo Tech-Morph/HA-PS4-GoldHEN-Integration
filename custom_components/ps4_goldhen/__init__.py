@@ -494,7 +494,7 @@ class PS4FTPUploadView(HomeAssistantView):
         while True:
             part = await reader.next()
             if part is None:
-                break:
+                break
             if part.name == "entry_id":
                 entry_id = (await part.read(decode=True)).decode()
             elif part.name == "path":
