@@ -154,7 +154,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("bundled_payloads_installed", False)
-    g.setdefault("services_registered", False)
+    g.setdefault("views_registered", False)
     return root
 
 
@@ -335,10 +335,14 @@ def _sfo_parse_entries(data: bytes) -> dict[str, Any]:
 def _extract_title_info_from_sfo(data: bytes) -> tuple[str | None, str | None]:
     entries = _sfo_parse_entries(data)
 
+    content_id = entries.get("CONTENT_ID")
+    if not isinstance(content_id, str):
+        content_id = str(content_id or "")
+
     title_id = _normalize_title_id(
         entries.get("TITLE_ID")
         or entries.get("TITLEID")
-        or entries.get("CONTENT_ID", "")[-9:]
+        or (content_id[-9:] if content_id else None)
     )
 
     name = None
@@ -351,73 +355,120 @@ def _extract_title_info_from_sfo(data: bytes) -> tuple[str | None, str | None]:
     return title_id, name
 
 
-def _ftp_list_dirs(ftp: ftplib.FTP, remote_dir: str) -> list[str]:
+def _ftp_list_names(ftp: ftplib.FTP, remote_dir: str) -> list[str]:
     current_dir = ftp.pwd()
-    out: list[str] = []
+    names: list[str] = []
 
     try:
         ftp.cwd(remote_dir)
-    except Exception:
-        return out
+    except Exception as err:
+        _LOGGER.debug("Cannot cwd to %s: %s", remote_dir, err)
+        return names
 
     try:
         try:
-            for name, facts in ftp.mlsd():
-                if facts.get("type") == "dir":
-                    out.append(name)
+            for name, _facts in ftp.mlsd():
+                names.append(name)
         except Exception:
             for name in ftp.nlst():
                 base = posixpath.basename(str(name).rstrip("/"))
-                if base and base not in (".", ".."):
-                    out.append(base)
+                if base:
+                    names.append(base)
     finally:
         with contextlib.suppress(Exception):
             ftp.cwd(current_dir)
 
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for name in names:
+        if name in (".", ".."):
+            continue
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+
     return out
 
 
-def _ftp_read_file(ftp: ftplib.FTP, remote_path: str) -> bytes:
+def _ftp_read_file_if_exists(ftp: ftplib.FTP, remote_path: str) -> bytes | None:
     buffer = io.BytesIO()
-    ftp.retrbinary(f"RETR {remote_path}", buffer.write)
-    return buffer.getvalue()
+    try:
+        ftp.retrbinary(f"RETR {remote_path}", buffer.write)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def _candidate_title_roots() -> tuple[str, ...]:
+    return (
+        "/user/appmeta",
+        "/user/app",
+        "/mnt/ext0/user/appmeta",
+        "/mnt/ext0/user/app",
+        "/mnt/ext1/user/appmeta",
+        "/mnt/ext1/user/app",
+    )
+
+
+def _candidate_sfo_paths_for_title(title_id: str) -> tuple[str, ...]:
+    return (
+        f"/user/appmeta/{title_id}/param.sfo",
+        f"/user/appmeta/{title_id}/PARAM.SFO",
+        f"/user/appmeta/{title_id}/sce_sys/param.sfo",
+        f"/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
+        f"/user/app/{title_id}/sce_sys/param.sfo",
+        f"/user/app/{title_id}/sce_sys/PARAM.SFO",
+        f"/mnt/ext0/user/appmeta/{title_id}/param.sfo",
+        f"/mnt/ext0/user/appmeta/{title_id}/PARAM.SFO",
+        f"/mnt/ext0/user/appmeta/{title_id}/sce_sys/param.sfo",
+        f"/mnt/ext0/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
+        f"/mnt/ext0/user/app/{title_id}/sce_sys/param.sfo",
+        f"/mnt/ext0/user/app/{title_id}/sce_sys/PARAM.SFO",
+        f"/mnt/ext1/user/appmeta/{title_id}/param.sfo",
+        f"/mnt/ext1/user/appmeta/{title_id}/PARAM.SFO",
+        f"/mnt/ext1/user/appmeta/{title_id}/sce_sys/param.sfo",
+        f"/mnt/ext1/user/appmeta/{title_id}/sce_sys/PARAM.SFO",
+        f"/mnt/ext1/user/app/{title_id}/sce_sys/param.sfo",
+        f"/mnt/ext1/user/app/{title_id}/sce_sys/PARAM.SFO",
+    )
 
 
 def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]:
     title_map: dict[str, dict[str, Any]] = {}
+    title_ids: set[str] = set()
 
     with ftplib.FTP() as ftp:
         ftp.connect(host, int(port), timeout=20)
         ftp.login()
 
-        title_ids: set[str] = set()
+        for root in _candidate_title_roots():
+            names = _ftp_list_names(ftp, root)
+            _LOGGER.warning("PS4 title scan root %s returned %d entries", root, len(names))
+            for name in names:
+                tid = _normalize_title_id(name)
+                if tid:
+                    title_ids.add(tid)
 
-        for root in ("/user/app", "/user/appmeta"):
-            for name in _ftp_list_dirs(ftp, root):
-                title_id = _normalize_title_id(name)
-                if title_id:
-                    title_ids.add(title_id)
+        _LOGGER.warning("PS4 title scan discovered %d title IDs before SFO parsing", len(title_ids))
 
         for title_id in sorted(title_ids):
-            candidate_paths = (
-                f"/user/appmeta/{title_id}/param.sfo",
-                f"/user/appmeta/{title_id}/sce_sys/param.sfo",
-                f"/user/app/{title_id}/sce_sys/param.sfo",
-            )
-
             parsed_name: str | None = None
             parsed_title_id: str | None = None
             used_path: str | None = None
 
-            for candidate in candidate_paths:
+            for candidate in _candidate_sfo_paths_for_title(title_id):
+                sfo_bytes = _ftp_read_file_if_exists(ftp, candidate)
+                if not sfo_bytes:
+                    continue
+
                 try:
-                    sfo_bytes = _ftp_read_file(ftp, candidate)
                     parsed_title_id, parsed_name = _extract_title_info_from_sfo(sfo_bytes)
                     used_path = candidate
                     if parsed_name:
                         break
-                except Exception:
-                    continue
+                except Exception as err:
+                    _LOGGER.debug("Failed parsing %s: %s", candidate, err)
 
             resolved_title_id = parsed_title_id or title_id
             if not parsed_name:
@@ -430,6 +481,7 @@ def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]
                 "last_seen": int(time.time()),
             }
 
+    _LOGGER.warning("PS4 title scan resolved %d titles with names", len(title_map))
     return title_map
 
 
@@ -444,6 +496,7 @@ async def _refresh_titles_cache(
 
     file_path = entry_data["titles_file"]
     persisted = await hass.async_add_executor_job(_load_title_map_blocking, file_path)
+    _LOGGER.warning("Persisted title map count before refresh: %d", len(persisted))
 
     discovered: dict[str, dict[str, Any]] = {}
     try:
@@ -454,6 +507,8 @@ async def _refresh_titles_cache(
         )
     except Exception as err:
         _LOGGER.warning("Failed refreshing title map from PS4 %s: %s", entry_data["host"], err)
+
+    _LOGGER.warning("Discovered title map count from PS4: %d", len(discovered))
 
     merged = _merge_title_maps(discovered, persisted)
     await hass.async_add_executor_job(_save_title_map_blocking, file_path, merged)
@@ -965,8 +1020,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=_REFRESH_TITLES_SCHEMA,
         )
 
-    hass.http.register_view(PS4FTPDownloadView())
-    hass.http.register_view(PS4FTPUploadView())
+    if not g["views_registered"]:
+        hass.http.register_view(PS4FTPDownloadView())
+        hass.http.register_view(PS4FTPUploadView())
+        g["views_registered"] = True
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
