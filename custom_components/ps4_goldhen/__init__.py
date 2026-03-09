@@ -42,7 +42,6 @@ from .const import (
     TCP_PROBE_TIMEOUT,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,8 +63,6 @@ _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
 _HOME_SCREEN_STATE = "PlayStation Home Screen"
 _IDLE_STATE = "Idle"
-_REST_MODE_STATE = "Rest Mode"
-_OFF_STATE = "Off"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
@@ -136,7 +133,6 @@ _KLOG_NOISE_PATTERNS = (
 )
 
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -148,8 +144,6 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("bundled_payloads_installed", False)
-    g.setdefault("services_registered", False)
-    g.setdefault("views_registered", False)
     return root
 
 
@@ -277,22 +271,14 @@ class KlogStateMachine:
         self.pending_reason: str | None = None
         self.pending_expires_at = 0.0
         self.recent_lines: deque[str] = deque(maxlen=250)
-        self.klog_connected: bool = True
 
     def snapshot(self) -> dict[str, Any]:
-        # Derive title_id: only set when current_state is a real game title ID
-        title_id: str | None = None
-        if _is_real_game_title_id(self.current_state):
-            title_id = self.current_state
-
         return {
             SENSOR_CURRENT_GAME: self.current_state,
-            "title_id": title_id,
             "state_reason": self.last_reason,
             "state_signal_line": self.last_signal_line,
             "pending_title_id": self.pending_title_id,
             "pending_reason": self.pending_reason,
-            "klog_connected": self.klog_connected,
         }
 
     def _set_state(self, state: str, reason: str, line: str) -> bool:
@@ -305,7 +291,7 @@ class KlogStateMachine:
         self.last_reason = reason
         self.last_signal_line = line[-300:]
 
-        if state in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE):
+        if state in (_HOME_SCREEN_STATE, _IDLE_STATE):
             self.pending_title_id = None
             self.pending_reason = None
             self.pending_expires_at = 0.0
@@ -336,16 +322,9 @@ class KlogStateMachine:
             self.pending_reason = None
             self.pending_expires_at = 0.0
 
-    def set_disconnected(self) -> bool:
-        """Called when the klog TCP connection drops — mark as disconnected."""
-        self.klog_connected = False
-        # Update the snapshot so sensor.py can reflect disconnected state via Pi sensor
-        return True
-
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
         self._clear_expired_pending()
-        self.klog_connected = True
 
         for pattern in _KLOG_IDLE_PATTERNS:
             if pattern.search(line):
@@ -400,7 +379,7 @@ class KlogStateMachine:
         if _KLOG_SHELL_FG_PATTERN.search(line):
             return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
 
-        if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE, _REST_MODE_STATE, _OFF_STATE):
+        if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
             return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
 
         return False
@@ -421,13 +400,6 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
         except ValueError:
             pass
 
-    match = _KLOG_RSX_TEMP_PATTERN.search(line)
-    if match:
-        try:
-            klog_data[SENSOR_RSX_TEMP] = float(match.group(1))
-        except ValueError:
-            pass
-
     return state_changed
 
 
@@ -445,15 +417,6 @@ async def _klog_listener_task(
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
             _LOGGER.info("Connected to klog at %s:%d", host, port)
-
-            entry_data = hass.data[DOMAIN].get(entry_id)
-            if entry_data:
-                sm: KlogStateMachine = entry_data["klog_state_machine"]
-                sm.klog_connected = True
-                entry_data["klog_data"].update(sm.snapshot())
-                coordinator.async_set_updated_data(
-                    {**(coordinator.data or {}), **entry_data["klog_data"]}
-                )
 
             text_buffer = ""
 
@@ -498,16 +461,6 @@ async def _klog_listener_task(
             raise
         except Exception as err:
             _LOGGER.warning("Klog listener error: %s, retrying in 30s", err)
-
-        # Mark disconnected on any connection failure/close
-        entry_data = hass.data[DOMAIN].get(entry_id)
-        if entry_data and "klog_state_machine" in entry_data:
-            sm: KlogStateMachine = entry_data["klog_state_machine"]
-            sm.set_disconnected()
-            entry_data["klog_data"].update(sm.snapshot())
-            coordinator.async_set_updated_data(
-                {**(coordinator.data or {}), **entry_data["klog_data"]}
-            )
 
         await asyncio.sleep(30)
 
@@ -599,7 +552,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_data": {
             **state_machine.snapshot(),
             SENSOR_CPU_TEMP: None,
-            SENSOR_RSX_TEMP: None,
         },
     }
 
@@ -646,10 +598,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
         hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
 
-    if not g["views_registered"]:
-        hass.http.register_view(PS4FTPDownloadView())
-        hass.http.register_view(PS4FTPUploadView())
-        g["views_registered"] = True
+    hass.http.register_view(PS4FTPDownloadView())
+    hass.http.register_view(PS4FTPUploadView())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
