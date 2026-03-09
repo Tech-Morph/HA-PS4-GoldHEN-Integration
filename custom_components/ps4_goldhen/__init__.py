@@ -632,7 +632,7 @@ class KlogStateMachine:
                 if _is_real_game_title_id(title_id):
                     return self._set_state(title_id, "launch_detected", line)
 
-        # PRIORITY 2: AppFocusChanged pattern (mainly for going back home)
+        # PRIORITY 2: AppFocusChanged pattern
         match = _KLOG_FOCUS_PATTERN.search(line)
         if match:
             old_app = match.group(1).strip().upper()
@@ -642,23 +642,27 @@ class KlogStateMachine:
             if _is_real_game_title_id(new_app):
                 return self._set_state(new_app, "focus_to_game", line)
 
-            # Home screen: only if coming from a real game
-            if new_app == _HOME_SCREEN_APP_ID and _is_real_game_title_id(old_app):
-                return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
+            # CRITICAL FIX: Ignore NPXS20001 transitions - they're just noise during gameplay
+            # Only suspendApp() can bring us back to home
+            if new_app == _HOME_SCREEN_APP_ID:
+                return False
 
-        # When in a game, ignore ShellUI noise
+        # When in a game, COMPLETELY IGNORE these patterns - they're just noise
         if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+            # Ignore ShellUI foreground messages during gameplay
             if _KLOG_SHELL_FG_PATTERN.search(line):
                 return False
 
+            # Ignore VCS shell focus messages during gameplay
             if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
                 return False
 
+            # Ignore home scene patterns during gameplay
             for pattern in _KLOG_HOME_SCENE_PATTERNS:
                 if pattern.search(line):
                     return False
 
-        # Home detection when already home/idle
+        # Home detection: ONLY when we're already home/idle
         if self.current_state in (_HOME_SCREEN_STATE, _IDLE_STATE):
             for pattern in _KLOG_HOME_SCENE_PATTERNS:
                 if pattern.search(line):
@@ -670,7 +674,7 @@ class KlogStateMachine:
             if _KLOG_SHELL_FG_PATTERN.search(line):
                 return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
 
-        # Suspend hint: return to home
+        # Suspend hint: ONLY signal that can force us back to home from a game
         if _KLOG_SUSPEND_APP_PATTERN.search(line):
             if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
                 return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home", line)
