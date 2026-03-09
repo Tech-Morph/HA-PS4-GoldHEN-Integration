@@ -589,9 +589,8 @@ class KlogStateMachine:
         self.current_state = _HOME_SCREEN_STATE
         self.last_reason = "init"
         self.last_signal_line = ""
-        self.pending_title_id: str | None = None
-        self.pending_reason: str | None = None
-        self.pending_expires_at = 0.0
+        self.last_real_game: str | None = None  # ADDED: Track the last real game we saw
+        self.last_real_game_time = 0.0  # ADDED: When we last saw it
         self.recent_lines: deque[str] = deque(maxlen=250)
 
     def snapshot(self) -> dict[str, Any]:
@@ -599,8 +598,8 @@ class KlogStateMachine:
             SENSOR_CURRENT_GAME: self.current_state,
             "state_reason": self.last_reason,
             "state_signal_line": self.last_signal_line,
-            "pending_title_id": self.pending_title_id,
-            "pending_reason": self.pending_reason,
+            "pending_title_id": None,  # CHANGED: Always None now
+            "pending_reason": None,  # CHANGED: Always None now
         }
 
     def _set_state(self, state: str, reason: str, line: str) -> bool:
@@ -613,12 +612,19 @@ class KlogStateMachine:
         self.last_reason = reason
         self.last_signal_line = line[-300:]
 
-        # Clear pending when we commit a state
-        self.pending_title_id = None
-        self.pending_reason = None
-        self.pending_expires_at = 0.0
+        # ADDED: Track last real game and timestamp
+        if _is_real_game_title_id(state):
+            self.last_real_game = state
+            self.last_real_game_time = time.monotonic()
 
         return changed
+
+    def _should_ignore_home_transition(self) -> bool:
+        """ADDED: Ignore Home transitions for 20 seconds after seeing a real game."""
+        if not self.last_real_game:
+            return False
+        elapsed = time.monotonic() - self.last_real_game_time
+        return elapsed < 20.0
 
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
@@ -626,6 +632,7 @@ class KlogStateMachine:
         # Check for idle/power mode changes
         for pattern in _KLOG_IDLE_PATTERNS:
             if pattern.search(line):
+                self.last_real_game = None  # ADDED: Clear game tracking on idle
                 return self._set_state(_IDLE_STATE, "power_idle", line)
 
         # Filter out known noisy patterns
@@ -633,7 +640,7 @@ class KlogStateMachine:
             if pattern.search(line):
                 return False
 
-        # FIXED: AppFocusChanged is authoritative and immediately commits state
+        # AppFocusChanged pattern
         match = _KLOG_FOCUS_PATTERN.search(line)
         if match:
             old_app = match.group(1).strip().upper()
@@ -643,13 +650,20 @@ class KlogStateMachine:
             if _is_real_game_title_id(new_app):
                 return self._set_state(new_app, "focus_to_game", line)
 
-            # Home screen: commit only if coming from a game or non-home state
+            # MODIFIED: Home screen (NPXS20001): ignore if we just saw a game recently
             if new_app == _HOME_SCREEN_APP_ID:
+                if self._should_ignore_home_transition():
+                    _LOGGER.debug("Ignoring NPXS20001 transition during game launch window (%.1fs since game)", 
+                                  time.monotonic() - self.last_real_game_time)
+                    return False
+                
+                # Only switch to Home if coming from a real game or non-home state
                 if _is_real_game_title_id(old_app) or self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+                    self.last_real_game = None  # ADDED: Clear game tracking when actually going home
                     return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
                 return False
 
-        # When in a game, ignore ShellUI noise that happens during transitions
+        # When in a game, ignore ShellUI noise
         if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
             if _KLOG_SHELL_FG_PATTERN.search(line):
                 return False
@@ -675,6 +689,7 @@ class KlogStateMachine:
 
         # Suspend hint: return to home
         if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+            self.last_real_game = None  # ADDED: Clear game tracking on suspend
             return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
 
         return False
