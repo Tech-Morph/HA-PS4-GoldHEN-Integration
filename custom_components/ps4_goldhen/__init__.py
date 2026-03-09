@@ -8,7 +8,6 @@ import io
 import json
 import logging
 import os
-import posixpath
 import re
 import shutil
 import sqlite3
@@ -91,13 +90,10 @@ _KLOG_FOCUS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Keep this strict. The broad TopMenuBG/ContentAreaScene pattern is too noisy.
 _KLOG_HOME_SCENE_PATTERNS = (
     re.compile(
         r"OnFocusActiveSceneChanged\s+\[AppScreen\s*:\s*ApplicationScreenScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+AppScreen\s+ApplicationScreenScene\s*-\s*ContentAreaScene\s+ContentAreaScene",
         re.IGNORECASE,
     ),
 )
@@ -665,14 +661,13 @@ class KlogStateMachine:
             old_app = match.group(1).strip().upper()
             new_app = match.group(2).strip().upper()
 
-            if new_app == _HOME_SCREEN_APP_ID:
-                return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
-
             if _is_real_game_title_id(new_app):
                 return self._set_state(new_app, "focus_to_game", line)
 
-            if old_app == _HOME_SCREEN_APP_ID and _is_real_game_title_id(new_app):
-                return self._set_state(new_app, "focus_home_to_game", line)
+            if new_app == _HOME_SCREEN_APP_ID:
+                if _is_real_game_title_id(old_app) or self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+                    return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
+                return False
 
         for pattern in _KLOG_LAUNCH_PATTERNS:
             match = pattern.search(line)
@@ -695,15 +690,30 @@ class KlogStateMachine:
             if _KLOG_SHELL_BG_PATTERN.search(line):
                 return self._set_state(self.pending_title_id, "shell_bg_game_confirmed", line)
 
-        for pattern in _KLOG_HOME_SCENE_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_HOME_SCREEN_STATE, "scene_home_confirmed", line)
+        # When already in a game, ignore ShellUI foreground/background chatter.
+        if self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
+            if _KLOG_SHELL_FG_PATTERN.search(line):
+                return False
 
-        if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
-            return self._set_state(_HOME_SCREEN_STATE, "shell_focus_confirmed", line)
+            if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
+                return False
 
-        if _KLOG_SHELL_FG_PATTERN.search(line):
-            return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
+            for pattern in _KLOG_HOME_SCENE_PATTERNS:
+                if pattern.search(line):
+                    return False
+
+        # Only trust these home hints when we're already home/idle,
+        # or when an explicit AppFocusChanged to NPXS20001 happened above.
+        if self.current_state in (_HOME_SCREEN_STATE, _IDLE_STATE):
+            for pattern in _KLOG_HOME_SCENE_PATTERNS:
+                if pattern.search(line):
+                    return self._set_state(_HOME_SCREEN_STATE, "scene_home_confirmed", line)
+
+            if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
+                return self._set_state(_HOME_SCREEN_STATE, "shell_focus_confirmed", line)
+
+            if _KLOG_SHELL_FG_PATTERN.search(line):
+                return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
 
         if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
             return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
