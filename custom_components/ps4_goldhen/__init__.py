@@ -363,6 +363,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # IMPORTANT: Use a background task so it will not block Home Assistant startup.
     klog_task = entry.async_create_background_task(
+        hass,
         _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator),
         name=f"{DOMAIN}_klog_{entry.entry_id}",
     )
