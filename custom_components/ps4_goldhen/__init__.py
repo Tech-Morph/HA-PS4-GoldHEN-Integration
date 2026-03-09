@@ -30,6 +30,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from . import websocket as _ws_module
 from .const import (
     DOMAIN,
     PLATFORMS,
@@ -1065,6 +1066,9 @@ def _register_websocket_handlers_once(hass: HomeAssistant) -> None:
     if g["ws_registered"]:
         return
     g["ws_registered"] = True
+
+    # Register all FTP file browser + klog subscribe commands from websocket.py
+    _ws_module.async_setup(hass)
 
     @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/state"})
     @websocket_api.async_response
