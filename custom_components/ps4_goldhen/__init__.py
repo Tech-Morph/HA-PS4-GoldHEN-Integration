@@ -378,4 +378,168 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store for klog-parsed sensor data
     root[entry.entry_id]["klog_data"] = {
         SENSOR_CURRENT_GAME: "Unknown",
-        SENSOR
+        SENSOR_CPU_TEMP: None,
+        SENSOR_RSX_TEMP: None,
+    }
+
+    # Start klog listener background task
+    klog_task = hass.async_create_task(
+        _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator)
+    )
+    root[entry.entry_id]["klog_task"] = klog_task
+
+    g = _global(hass)
+
+    if not g["ws_registered"]:
+        websocket_api.async_register_command(hass, ws_list_entries)
+        websocket_api.async_register_command(hass, ws_list_payloads)
+
+        from .websocket import async_setup as async_setup_websocket
+        async_setup_websocket(hass)
+        g["ws_registered"] = True
+
+    await _register_frontend_and_panel_once(hass)
+
+    if not g.get("bundled_payloads_installed"):
+        await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
+        g["bundled_payloads_installed"] = True
+
+    _SEND_PAYLOAD_SCHEMA = vol.Schema({
+        vol.Required("payload_file"): str,
+        vol.Optional("ps4_host"): str,
+        vol.Optional("binloader_port"): vol.All(
+            vol.Coerce(int), vol.Range(min=1024, max=65535)
+        ),
+        vol.Optional("timeout", default=30): vol.All(
+            vol.Coerce(float), vol.Range(min=1)
+        ),
+    })
+
+    async def handle_send_payload(call: ServiceCall) -> None:
+        p_file = call.data["payload_file"]
+        t_host = call.data.get("ps4_host") or host
+        t_port = int(call.data.get("binloader_port") or binloader_port)
+        filepath = (
+            p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
+        )
+        await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
+
+    if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
+        hass.services.async_register(
+            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
+            schema=_SEND_PAYLOAD_SCHEMA,
+        )
+
+    hass.http.register_view(PS4FTPDownloadView())
+    hass.http.register_view(PS4FTPUploadView())
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    return True
+
+
+class PS4FTPDownloadView(HomeAssistantView):
+    url = "/api/ps4_goldhen/ftp/download"
+    name = "api:ps4_goldhen:ftp_download"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        import ftplib
+
+        entry_id = request.query.get("entry_id")
+        path = request.query.get("path")
+
+        if not entry_id or not path:
+            return web.Response(text="Missing entry_id or path", status=400)
+
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+
+        def _get_file():
+            buffer = io.BytesIO()
+            with ftplib.FTP() as ftp:
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.login()
+                ftp.retrbinary(f"RETR {path}", buffer.write)
+            return buffer.getvalue()
+
+        try:
+            content = await request.app["hass"].async_add_executor_job(_get_file)
+            return web.Response(
+                body=content,
+                content_type="application/octet-stream",
+                headers={
+                    "Content-Disposition":
+                    f'attachment; filename="{os.path.basename(path)}"'
+                },
+            )
+        except Exception as err:
+            return web.Response(text=f"FTP Error: {err}", status=500)
+
+
+class PS4FTPUploadView(HomeAssistantView):
+    url = "/api/ps4_goldhen/ftp/upload"
+    name = "api:ps4_goldhen:ftp_upload"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        import ftplib
+
+        reader = await request.multipart()
+        entry_id, path, file_field = None, None, None
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break:
+            if part.name == "entry_id":
+                entry_id = (await part.read(decode=True)).decode()
+            elif part.name == "path":
+                path = (await part.read(decode=True)).decode()
+            elif part.name == "file":
+                file_field = part
+                break
+
+        if not all([entry_id, path, file_field]):
+            return web.Response(text="Missing data", status=400)
+
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+
+        full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
+
+        def _upload_file(content):
+            with ftplib.FTP() as ftp:
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.login()
+                ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
+
+        try:
+            await request.app["hass"].async_add_executor_job(
+                _upload_file, await file_field.read(decode=True)
+            )
+            return web.json_response({"success": True, "path": full_dest})
+        except Exception as err:
+            return web.Response(text=f"FTP Upload Error: {err}", status=500)
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    if unload_ok:
+        entry_data = _ensure_domain_root(hass).get(entry.entry_id)
+        if entry_data and "klog_task" in entry_data:
+            # Cancel the klog listener task
+            entry_data["klog_task"].cancel()
+        
+        _ensure_domain_root(hass).pop(entry.entry_id, None)
+
+    return unload_ok
