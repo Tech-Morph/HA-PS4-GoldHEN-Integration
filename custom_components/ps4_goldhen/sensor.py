@@ -14,7 +14,6 @@ from .const import (
     CONF_PS4_HOST,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
 )
 
 _HOME_SCREEN_STATE = "PlayStation Home Screen"
@@ -38,7 +37,6 @@ async def async_setup_entry(
             PS4FTPStatusSensor(coordinator, entry),
             PS4CurrentGameSensor(coordinator, entry),
             PS4CPUTempSensor(coordinator, entry),
-            PS4RSXTempSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -158,22 +156,4 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
-        return float(temp) if temp is not None else None
-
-
-class PS4RSXTempSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "RSX Temperature"
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_icon = "mdi:thermometer"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_rsx_temp"
-
-    @property
-    def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
-        temp = data.get(SENSOR_RSX_TEMP)
         return float(temp) if temp is not None else None
