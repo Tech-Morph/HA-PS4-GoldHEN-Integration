@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ftplib
 import io
+import json
 import logging
 import os
+import posixpath
 import re
 import shutil
+import struct
 import time
 from collections import deque
 from datetime import timedelta
@@ -48,7 +52,10 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 _FTP_POLL_INTERVAL = timedelta(seconds=30)
+_TITLES_REFRESH_INTERVAL = timedelta(hours=6)
+
 _SVC_SEND_PAYLOAD = "send_payload"
+_SVC_REFRESH_TITLES = "refresh_titles"
 
 _PANEL_URL_PATH = "ps4_goldhen"
 _PANEL_SIDEBAR_TITLE = "PS4 GoldHEN"
@@ -67,6 +74,7 @@ _IDLE_STATE = "Idle"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
+_SFO_MAGIC = b"\x00PSF"
 
 _KLOG_LAUNCH_PATTERNS = (
     re.compile(r"launchApp\(\)\s*titleId=\[?([A-Z]{4}\d{5})\]?", re.IGNORECASE),
@@ -146,6 +154,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("bundled_payloads_installed", False)
+    g.setdefault("services_registered", False)
     return root
 
 
@@ -154,8 +163,11 @@ def _global(hass: HomeAssistant) -> dict[str, Any]:
     return root["_global"]
 
 
+def _titles_file_path(hass: HomeAssistant) -> str:
+    return hass.config.path(f"{DOMAIN}_titles.json")
+
+
 def _copy_bundled_payloads_to_config() -> int:
-    """Copy bundled payloads shipped with the integration into /config/ps4_payloads."""
     src_dir = Path(__file__).parent / _BUNDLED_PAYLOADS_DIRNAME
     dst_dir = Path(PAYLOAD_DIR)
 
@@ -178,7 +190,6 @@ def _copy_bundled_payloads_to_config() -> int:
 
 
 def _list_payloads_blocking(payload_dir: str) -> list[str]:
-    """Blocking payload directory scan."""
     p = Path(payload_dir)
     p.mkdir(parents=True, exist_ok=True)
     items: list[str] = []
@@ -192,6 +203,288 @@ def _list_payloads_blocking(payload_dir: str) -> list[str]:
             items.append(name)
 
     return items
+
+
+def _normalize_title_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip().upper()
+    if _TITLE_ID_RE.fullmatch(value):
+        return value
+    return None
+
+
+def _normalize_title_map(raw_map: Any) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+
+    if not isinstance(raw_map, dict):
+        return out
+
+    for key, value in raw_map.items():
+        title_id = _normalize_title_id(str(key))
+        if not title_id:
+            continue
+
+        if isinstance(value, str):
+            name = value.strip()
+            if not name:
+                continue
+            out[title_id] = {"name": name, "source": "manual"}
+            continue
+
+        if not isinstance(value, dict):
+            continue
+
+        name = str(value.get("name", "")).strip()
+        if not name:
+            continue
+
+        item = dict(value)
+        item["name"] = name
+        item["source"] = str(item.get("source", "manual")).strip() or "manual"
+        out[title_id] = item
+
+    return out
+
+
+def _load_title_map_blocking(file_path: str) -> dict[str, dict[str, Any]]:
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as err:
+        _LOGGER.warning("Unable to read title map %s: %s", file_path, err)
+        return {}
+
+    return _normalize_title_map(raw)
+
+
+def _save_title_map_blocking(file_path: str, title_map: dict[str, dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(title_map.items())), f, indent=2, ensure_ascii=False)
+
+
+def _merge_title_maps(
+    discovered: dict[str, dict[str, Any]],
+    persisted: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = dict(discovered)
+
+    for title_id, item in persisted.items():
+        existing = merged.get(title_id, {})
+        merged[title_id] = {**existing, **item}
+
+    return dict(sorted(merged.items()))
+
+
+def _sfo_parse_entries(data: bytes) -> dict[str, Any]:
+    if len(data) < 20 or data[:4] != _SFO_MAGIC:
+        raise ValueError("Invalid PARAM.SFO header")
+
+    _magic, version, key_table_offset, data_table_offset, entry_count = struct.unpack_from(
+        "<4sIIII", data, 0
+    )
+
+    if version == 0:
+        raise ValueError("Invalid PARAM.SFO version")
+
+    entries: dict[str, Any] = {}
+
+    for index in range(entry_count):
+        entry_offset = 20 + (index * 16)
+        if entry_offset + 16 > len(data):
+            break
+
+        key_offset, fmt, data_len, data_max_len, data_offset = struct.unpack_from(
+            "<HHIII", data, entry_offset
+        )
+
+        key_start = key_table_offset + key_offset
+        if key_start >= len(data):
+            continue
+
+        key_end = data.find(b"\x00", key_start)
+        if key_end == -1:
+            continue
+
+        key = data[key_start:key_end].decode("utf-8", errors="ignore").strip()
+        if not key:
+            continue
+
+        value_start = data_table_offset + data_offset
+        value_end = value_start + min(data_len, data_max_len if data_max_len else data_len)
+        if value_start >= len(data):
+            continue
+
+        raw = data[value_start:min(value_end, len(data))]
+
+        if fmt in (0x0004, 0x0204):
+            value = raw.split(b"\x00", 1)[0].decode("utf-8", errors="ignore").strip()
+        elif fmt == 0x0404 and len(raw) >= 4:
+            value = struct.unpack_from("<I", raw, 0)[0]
+        else:
+            value = raw
+
+        entries[key] = value
+
+    return entries
+
+
+def _extract_title_info_from_sfo(data: bytes) -> tuple[str | None, str | None]:
+    entries = _sfo_parse_entries(data)
+
+    title_id = _normalize_title_id(
+        entries.get("TITLE_ID")
+        or entries.get("TITLEID")
+        or entries.get("CONTENT_ID", "")[-9:]
+    )
+
+    name = None
+    for key in ("TITLE", "STITLE", "TITLE_0", "TITLE_00"):
+        value = entries.get(key)
+        if isinstance(value, str) and value.strip():
+            name = value.strip()
+            break
+
+    return title_id, name
+
+
+def _ftp_list_dirs(ftp: ftplib.FTP, remote_dir: str) -> list[str]:
+    current_dir = ftp.pwd()
+    out: list[str] = []
+
+    try:
+        ftp.cwd(remote_dir)
+    except Exception:
+        return out
+
+    try:
+        try:
+            for name, facts in ftp.mlsd():
+                if facts.get("type") == "dir":
+                    out.append(name)
+        except Exception:
+            for name in ftp.nlst():
+                base = posixpath.basename(str(name).rstrip("/"))
+                if base and base not in (".", ".."):
+                    out.append(base)
+    finally:
+        with contextlib.suppress(Exception):
+            ftp.cwd(current_dir)
+
+    return out
+
+
+def _ftp_read_file(ftp: ftplib.FTP, remote_path: str) -> bytes:
+    buffer = io.BytesIO()
+    ftp.retrbinary(f"RETR {remote_path}", buffer.write)
+    return buffer.getvalue()
+
+
+def _build_title_map_from_ps4(host: str, port: int) -> dict[str, dict[str, Any]]:
+    title_map: dict[str, dict[str, Any]] = {}
+
+    with ftplib.FTP() as ftp:
+        ftp.connect(host, int(port), timeout=20)
+        ftp.login()
+
+        title_ids: set[str] = set()
+
+        for root in ("/user/app", "/user/appmeta"):
+            for name in _ftp_list_dirs(ftp, root):
+                title_id = _normalize_title_id(name)
+                if title_id:
+                    title_ids.add(title_id)
+
+        for title_id in sorted(title_ids):
+            candidate_paths = (
+                f"/user/appmeta/{title_id}/param.sfo",
+                f"/user/appmeta/{title_id}/sce_sys/param.sfo",
+                f"/user/app/{title_id}/sce_sys/param.sfo",
+            )
+
+            parsed_name: str | None = None
+            parsed_title_id: str | None = None
+            used_path: str | None = None
+
+            for candidate in candidate_paths:
+                try:
+                    sfo_bytes = _ftp_read_file(ftp, candidate)
+                    parsed_title_id, parsed_name = _extract_title_info_from_sfo(sfo_bytes)
+                    used_path = candidate
+                    if parsed_name:
+                        break
+                except Exception:
+                    continue
+
+            resolved_title_id = parsed_title_id or title_id
+            if not parsed_name:
+                continue
+
+            title_map[resolved_title_id] = {
+                "name": parsed_name,
+                "source": "ps4_ftp",
+                "sfo_path": used_path,
+                "last_seen": int(time.time()),
+            }
+
+    return title_map
+
+
+async def _refresh_titles_cache(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    entry_data = hass.data[DOMAIN].get(entry_id)
+    if not entry_data:
+        return
+
+    file_path = entry_data["titles_file"]
+    persisted = await hass.async_add_executor_job(_load_title_map_blocking, file_path)
+
+    discovered: dict[str, dict[str, Any]] = {}
+    try:
+        discovered = await hass.async_add_executor_job(
+            _build_title_map_from_ps4,
+            entry_data["host"],
+            entry_data["ftp_port"],
+        )
+    except Exception as err:
+        _LOGGER.warning("Failed refreshing title map from PS4 %s: %s", entry_data["host"], err)
+
+    merged = _merge_title_maps(discovered, persisted)
+    await hass.async_add_executor_job(_save_title_map_blocking, file_path, merged)
+
+    entry_data["title_map"] = merged
+    entry_data["title_map_updated_at"] = int(time.time())
+
+    coordinator.async_set_updated_data(
+        {
+            **(coordinator.data or {}),
+            **entry_data["klog_data"],
+            "title_map_updated_at": entry_data["title_map_updated_at"],
+        }
+    )
+
+
+async def _titles_refresh_task(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    while True:
+        try:
+            await _refresh_titles_cache(hass, entry_id, coordinator)
+        except asyncio.CancelledError:
+            _LOGGER.info("Title refresh task cancelled")
+            raise
+        except Exception as err:
+            _LOGGER.warning("Title refresh task error for %s: %s", entry_id, err)
+
+        await asyncio.sleep(_TITLES_REFRESH_INTERVAL.total_seconds())
 
 
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
@@ -233,7 +526,6 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
 
 
 async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30.0) -> None:
-    """Stream a local payload file to host:port."""
     loop = asyncio.get_running_loop()
 
     try:
@@ -255,7 +547,6 @@ async def _send_bin_tcp(host: str, port: int, filepath: str, timeout: float = 30
 
 
 def _is_real_game_title_id(value: str | None) -> bool:
-    """Return True for real game/app title IDs, excluding shell/system IDs."""
     if not value:
         return False
     value = value.strip().upper()
@@ -388,7 +679,6 @@ class KlogStateMachine:
 
 
 def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
-    """Parse a single klog line and update entry_data in place."""
     state_machine: KlogStateMachine = entry_data["klog_state_machine"]
     state_changed = state_machine.ingest(line)
 
@@ -419,7 +709,6 @@ async def _klog_listener_task(
     port: int,
     coordinator: DataUpdateCoordinator,
 ) -> None:
-    """Background task to listen to klog stream and update coordinator."""
     _LOGGER.info("Starting klog listener for %s:%d", host, port)
 
     while True:
@@ -449,7 +738,11 @@ async def _klog_listener_task(
 
                     _parse_klog_line(line, entry_data)
                     coordinator.async_set_updated_data(
-                        {**(coordinator.data or {}), **entry_data["klog_data"]}
+                        {
+                            **(coordinator.data or {}),
+                            **entry_data["klog_data"],
+                            "title_map_updated_at": entry_data.get("title_map_updated_at", 0),
+                        }
                     )
 
             if text_buffer:
@@ -457,7 +750,11 @@ async def _klog_listener_task(
                 if entry_data and "klog_data" in entry_data:
                     _parse_klog_line(text_buffer, entry_data)
                     coordinator.async_set_updated_data(
-                        {**(coordinator.data or {}), **entry_data["klog_data"]}
+                        {
+                            **(coordinator.data or {}),
+                            **entry_data["klog_data"],
+                            "title_map_updated_at": entry_data.get("title_map_updated_at", 0),
+                        }
                     )
 
             writer.close()
@@ -543,12 +840,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     root = _ensure_domain_root(hass)
 
     prev = root.get(entry.entry_id)
-    if isinstance(prev, dict) and prev.get("klog_task") is not None:
-        task = prev["klog_task"]
-        with contextlib.suppress(Exception):
-            task.cancel()
+    if isinstance(prev, dict):
+        for task_key in ("klog_task", "titles_task"):
+            if prev.get(task_key) is not None:
+                task = prev[task_key]
+                with contextlib.suppress(Exception):
+                    task.cancel()
 
     state_machine = KlogStateMachine()
+    titles_file = _titles_file_path(hass)
+    persisted_title_map = await hass.async_add_executor_job(_load_title_map_blocking, titles_file)
 
     root[entry.entry_id] = {
         "coordinator": coordinator,
@@ -557,6 +858,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ftp_port": ftp_port,
         "rpi_port": rpi_port,
         "klog_port": klog_port,
+        "titles_file": titles_file,
+        "title_map": persisted_title_map,
+        "title_map_updated_at": int(time.time()),
         "klog_state_machine": state_machine,
         "klog_data": {
             **state_machine.snapshot(),
@@ -571,6 +875,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=f"{DOMAIN}_klog_{entry.entry_id}",
     )
     root[entry.entry_id]["klog_task"] = klog_task
+
+    await _refresh_titles_cache(hass, entry.entry_id, coordinator)
+
+    titles_task = entry.async_create_background_task(
+        hass,
+        _titles_refresh_task(hass, entry.entry_id, coordinator),
+        name=f"{DOMAIN}_titles_{entry.entry_id}",
+    )
+    root[entry.entry_id]["titles_task"] = titles_task
 
     g = _global(hass)
 
@@ -598,6 +911,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
     )
 
+    _REFRESH_TITLES_SCHEMA = vol.Schema(
+        {
+            vol.Optional("entry_id"): str,
+        }
+    )
+
     async def handle_send_payload(call: ServiceCall) -> None:
         p_file = call.data["payload_file"]
         t_host = call.data.get("ps4_host") or host
@@ -605,8 +924,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         filepath = p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
         await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
 
+    async def handle_refresh_titles(call: ServiceCall) -> None:
+        requested_entry_id = call.data.get("entry_id")
+        target_entry_ids: list[str]
+
+        if requested_entry_id:
+            if requested_entry_id not in hass.data[DOMAIN]:
+                raise HomeAssistantError(f"Unknown entry_id: {requested_entry_id}")
+            target_entry_ids = [requested_entry_id]
+        else:
+            target_entry_ids = [
+                entry_id
+                for entry_id, entry_data in hass.data[DOMAIN].items()
+                if entry_id != "_global" and isinstance(entry_data, dict)
+            ]
+
+        for target_entry_id in target_entry_ids:
+            entry_data = hass.data[DOMAIN].get(target_entry_id)
+            if not entry_data:
+                continue
+            await _refresh_titles_cache(
+                hass,
+                target_entry_id,
+                entry_data["coordinator"],
+            )
+
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload, schema=_SEND_PAYLOAD_SCHEMA)
+        hass.services.async_register(
+            DOMAIN,
+            _SVC_SEND_PAYLOAD,
+            handle_send_payload,
+            schema=_SEND_PAYLOAD_SCHEMA,
+        )
+
+    if not hass.services.has_service(DOMAIN, _SVC_REFRESH_TITLES):
+        hass.services.async_register(
+            DOMAIN,
+            _SVC_REFRESH_TITLES,
+            handle_refresh_titles,
+            schema=_REFRESH_TITLES_SCHEMA,
+        )
 
     hass.http.register_view(PS4FTPDownloadView())
     hass.http.register_view(PS4FTPUploadView())
@@ -624,8 +981,6 @@ class PS4FTPDownloadView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
-        import ftplib
-
         entry_id = request.query.get("entry_id")
         path = request.query.get("path")
 
@@ -661,8 +1016,6 @@ class PS4FTPUploadView(HomeAssistantView):
     requires_auth = True
 
     async def post(self, request: web.Request) -> web.Response:
-        import ftplib
-
         reader = await request.multipart()
         entry_id, path, file_field = None, None, None
 
@@ -706,11 +1059,13 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry_data = _ensure_domain_root(hass).get(entry.entry_id)
-    if entry_data and entry_data.get("klog_task") is not None:
-        task = entry_data["klog_task"]
-        task.cancel()
-        with contextlib.suppress(Exception):
-            await asyncio.gather(task, return_exceptions=True)
+    if entry_data:
+        for task_key in ("klog_task", "titles_task"):
+            if entry_data.get(task_key) is not None:
+                task = entry_data[task_key]
+                task.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(task, return_exceptions=True)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
