@@ -35,7 +35,7 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     async_add_entities([
         PS4FTPStatusSensor(coordinator, entry),
-        PS4CurrentGameSensor(entry),  # Removed coordinator, runs independently
+        PS4CurrentGameSensor(entry),
         PS4CPUTempSensor(coordinator, entry),
     ])
 
@@ -72,7 +72,7 @@ class PS4CurrentGameSensor(SensorEntity):
         self._attr_native_value = "Idle"
         
         self._title_cache = {
-            "NPXS20001": "Home Screen"
+            "NPXS20001": "PlayStation Home Screen"
         }
         self._monitor_task = None
 
@@ -86,7 +86,7 @@ class PS4CurrentGameSensor(SensorEntity):
             self._monitor_task.cancel()
 
     async def _async_get_game_title(self, title_id: str) -> str:
-        """Fetch the game title using HA's aiohttp session."""
+        """Fetch the game title using Sony's official Metadata Database (TMDB)."""
         if title_id in self._title_cache:
             return self._title_cache[title_id]
             
@@ -96,19 +96,28 @@ class PS4CurrentGameSensor(SensorEntity):
             return name
 
         session = async_get_clientsession(self.hass)
-        url = f"https://orbispatches.com/api/patches/{title_id}"
+        
+        # Sony's official TMDB endpoint for PS4 uses the CUSA ID + _00
+        url = f"https://tmdb.np.dl.playstation.net/tmdb2/{title_id}_00.xml"
         
         try:
             async with session.get(url, timeout=5) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    name = data.get("title", title_id)
-                    self._title_cache[title_id] = name
-                    return name
+                    xml_data = await response.text()
+                    
+                    # Extract the title name from the XML using regex
+                    # Sony typically places it inside <name> tags
+                    match = re.search(r'<name>(.*?)</name>', xml_data, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        self._title_cache[title_id] = name
+                        return name
+                        
         except (ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.debug("Failed to fetch title for %s: %s", title_id, err)
+            _LOGGER.debug("Failed to fetch title from Sony TMDB for %s: %s", title_id, err)
             
-        return title_id # Fallback to the raw CUSA ID if API fails
+        # Fallback to the raw CUSA ID if offline/fails
+        return title_id 
 
     async def _klog_monitor_loop(self) -> None:
         """Background task to continuously read from the PS4 klog socket."""
@@ -147,7 +156,7 @@ class PS4CurrentGameSensor(SensorEntity):
                 self._attr_native_value = "Disconnected"
                 self.async_write_ha_state()
                 
-            # If PS4 goes offline, wait 10 seconds before attempting to reconnect
+            # Wait 10 seconds before attempting to reconnect if the PS4 is turned off
             await asyncio.sleep(10)
 
 
