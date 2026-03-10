@@ -273,12 +273,8 @@ class KlogStateMachine:
         if m:
             new_app = m.group(2).strip().upper()
             if _is_real_game_title_id(new_app):
-                # Confirmed game in foreground — clear pending and set state
                 return self._set(new_app, "sl_focus_game", line)
             elif new_app == _HOME_SCREEN_APP_ID:
-                # Only clear to home screen if no launch is in progress.
-                # During app launch the PS4 fires a transient home focus
-                # signal before the game takes over — ignore it.
                 if self._pending_launch:
                     _LOGGER.debug(
                         "Ignoring sl_focus_home — launch pending for %s",
@@ -321,7 +317,6 @@ class KlogStateMachine:
 
         # ── ApplicationExitScene → ContentAreaScene ────────────────────────
         if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
-            # Same guard — ignore exit-to-home during a pending launch
             if self._pending_launch:
                 _LOGGER.debug(
                     "Ignoring exit_scene_to_home — launch pending for %s",
@@ -534,15 +529,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
     async def _poll_ftp() -> dict[str, Any]:
+        """
+        Periodic FTP reachability probe.
+        IMPORTANT: we merge into existing coordinator data so we never wipe
+        klog state (current game, title_id, etc.) that the klog listener wrote.
+        """
         try:
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
             )
             writer.close()
             await writer.wait_closed()
-            return {"ftp_reachable": True}
+            reachable = True
         except Exception:
-            return {"ftp_reachable": False}
+            reachable = False
+
+        # Pull the current klog state and merge ftp_reachable into it
+        entry_data = _ensure_domain_root(hass).get(entry.entry_id, {})
+        existing   = dict(entry_data.get("klog_data", {}))
+        existing["ftp_reachable"] = reachable
+        return existing
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -579,6 +585,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SENSOR_CPU_TEMP:   None,
             SENSOR_GAME_NAME:  None,
             SENSOR_GAME_COVER: None,
+            "ftp_reachable":   False,
         },
         "game_map": {},
     }
@@ -612,7 +619,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
         g["bundled_payloads_installed"] = True
 
-    # Register HTTP views once across all entries
     if not g.get("cover_view_registered"):
         hass.http.register_view(PS4FTPDownloadView())
         hass.http.register_view(PS4FTPUploadView())
@@ -748,13 +754,11 @@ class PS4GameCoverView(HomeAssistantView):
 
     Strategy (in order):
       1. If the game_map has a Sony CDN URL → 302 redirect directly to it.
-         Browser fetches the image from Sony, zero FTP involved.
-      2. Otherwise → FTP-fetch /user/appmeta/<TITLEID>/icon0.png from the PS4
-         and stream it back.
+      2. Otherwise → FTP-fetch /user/appmeta/<TITLEID>/icon0.png from the PS4.
     """
     url = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
     name = "api:ps4_goldhen:cover"
-    requires_auth = False  # img src requests never carry HA auth token
+    requires_auth = False
 
     async def get(
         self, request: web.Request, entry_id: str, title_id: str
@@ -768,12 +772,10 @@ class PS4GameCoverView(HomeAssistantView):
         tid = title_id.strip().upper()
         game_info = data.get("game_map", {}).get(tid, {})
 
-        # ── 1. CDN redirect (fast path) ────────────────────────────────────
         cdn_url = game_info.get("cdn_cover")
         if cdn_url and cdn_url.startswith("http"):
-            raise web.HTTPFound(cdn_url)  # 302 redirect — browser fetches directly
+            raise web.HTTPFound(cdn_url)
 
-        # ── 2. FTP fallback ────────────────────────────────────────────────
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
 
         def _fetch_cover():
@@ -794,6 +796,7 @@ class PS4GameCoverView(HomeAssistantView):
         except Exception as err:
             _LOGGER.debug("Cover FTP fetch failed for %s: %s", tid, err)
             return web.Response(text=f"Cover not found: {err}", status=404)
+
 
 # ── Teardown ───────────────────────────────────────────────────────────────────
 
