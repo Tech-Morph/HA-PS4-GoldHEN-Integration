@@ -25,7 +25,6 @@ _IDLE_STATE = "Idle"
 _REST_MODE_STATE = "Rest Mode"
 _OFF_STATE = "Off"
 
-# Entity ID of your Pi-based REST sensor
 _PI_STATE_SENSOR = "sensor.ps4_state_pi"
 
 
@@ -65,9 +64,11 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     """
     Reports the current PS4 state.
 
-    Power state (rest/off) comes from sensor.ps4_state_pi.
-    Game/home state comes from the klog state machine.
-    The Pi sensor overrides klog for power state — klog is only used when Pi says 'On'.
+    Priority for native_value:
+      - Rest / Off: from Pi sensor
+      - Home Screen: when no title is active
+      - Resolved game name: from app.db via game_map
+      - Raw title_id: fallback if game_map hasn't loaded yet
     """
 
     _attr_has_entity_name = True
@@ -82,7 +83,6 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
-        # Seed immediately from current Pi state
         pi = self.hass.states.get(_PI_STATE_SENSOR)
         if pi:
             self._pi_state = pi.state
@@ -102,13 +102,25 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
             self._pi_state = new.state
             self.async_write_ha_state()
 
-    def _klog_state(self) -> str:
-        """Raw klog-derived state (title ID or home screen label)."""
+    def _ps4_state(self) -> str:
+        """
+        Resolve the active PS4 state string.
+        Returns resolved game name, HOME_SCREEN, or raw title_id as last resort.
+        """
         data = self.coordinator.data or {}
-        val = data.get(SENSOR_CURRENT_GAME)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-        return _HOME_SCREEN_STATE
+        tid = data.get(SENSOR_TITLE_ID)          # e.g. "CUSA12345" or None
+
+        if not tid:
+            # No game active — home screen
+            return _HOME_SCREEN_STATE
+
+        # Prefer the resolved name from app.db
+        name = data.get(SENSOR_GAME_NAME)
+        if name and name.strip():
+            return name.strip()
+
+        # game_map hasn't loaded yet — show title_id as placeholder
+        return tid
 
     @property
     def native_value(self) -> str:
@@ -119,30 +131,28 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         if pi == "offline":
             return _OFF_STATE
 
-        # Pi says 'on' (or unknown) — trust klog
-        return self._klog_state()
+        return self._ps4_state()
 
     @property
     def extra_state_attributes(self) -> dict:
         data = self.coordinator.data or {}
         val = self.native_value
+        tid = data.get(SENSOR_TITLE_ID)
 
         return {
-            SENSOR_TITLE_ID: data.get(SENSOR_TITLE_ID),
-            SENSOR_GAME_NAME: data.get(SENSOR_GAME_NAME),
+            SENSOR_TITLE_ID:   tid,
+            SENSOR_GAME_NAME:  data.get(SENSOR_GAME_NAME),
             SENSOR_GAME_COVER: data.get(SENSOR_GAME_COVER),
             "state_classification": (
-                "rest" if val == _REST_MODE_STATE
-                else "off" if val == _OFF_STATE
-                else "home_screen" if val == _HOME_SCREEN_STATE
-                else "idle" if val == _IDLE_STATE
-                else "game"
+                "rest"        if val == _REST_MODE_STATE else
+                "off"         if val == _OFF_STATE else
+                "home_screen" if val == _HOME_SCREEN_STATE else
+                "game"
             ),
-            "pi_state": self._pi_state,
-            "klog_state": self._klog_state(),
-            "klog_connected": data.get("klog_connected", False),
-            "state_reason": data.get("state_reason"),
-            "pending_title_id": data.get("pending_title_id"),
+            "pi_state":          self._pi_state,
+            "klog_connected":    data.get("klog_connected", False),
+            "state_reason":      data.get("state_reason"),
+            "pending_title_id":  data.get("pending_title_id"),
             "state_signal_line": data.get("state_signal_line"),
         }
 
