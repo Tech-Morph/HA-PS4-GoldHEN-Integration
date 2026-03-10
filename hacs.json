@@ -1,5 +1,6 @@
 {
-  "name": "PS4 GoldHEN",
-  "content_in_root": false,
-  "render_readme": true
+  "name": "PS4 GoldHEN Integration",
+  "content_in_subdirectory": true,
+  "iot_class": "local_push",
+  "homeassistant": "2023.1.0"
 }
