@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import shutil
-import time
 from collections import deque
 from datetime import timedelta
 from functools import partial
@@ -18,7 +17,7 @@ from typing import Any
 from aiohttp import web
 import voluptuous as vol
 
-from homeassistant.components import frontend, panel_custom, websocket_api
+from homeassistant.components import panel_custom, websocket_api
 from homeassistant.components.frontend import StaticPathConfig
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
@@ -125,6 +124,7 @@ def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     g.setdefault("frontend_registered", False)
     g.setdefault("ws_registered", False)
     g.setdefault("bundled_payloads_installed", False)
+    g.setdefault("cover_view_registered", False)
     return root
 
 
@@ -328,7 +328,6 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
     klog_data = entry_data["klog_data"]
     klog_data.update(state_machine.snapshot())
 
-    # Always sync game_name + cover from game_map whenever title_id is known
     tid = klog_data.get(SENSOR_TITLE_ID)
     if tid:
         game_info = entry_data.get("game_map", {}).get(tid, {})
@@ -426,11 +425,6 @@ async def _db_refresh_task(
     entry_id: str,
     coordinator: DataUpdateCoordinator,
 ) -> None:
-    """
-    Periodically download app.db from the PS4 over FTP and rebuild the
-    game_map.  Runs immediately on startup, then every DB_REFRESH_INTERVAL
-    seconds.  Errors are logged but never crash the task.
-    """
     while True:
         entry_data = hass.data[DOMAIN].get(entry_id)
         if not entry_data:
@@ -448,7 +442,6 @@ async def _db_refresh_task(
                 "app.db refreshed for %s — %d titles loaded", host, len(game_map)
             )
 
-            # Immediately update klog_data if a game is currently running
             klog_data = entry_data["klog_data"]
             tid = klog_data.get(SENSOR_TITLE_ID)
             if tid and tid in game_map:
@@ -511,11 +504,11 @@ async def ws_list_payloads(
 # ── Config entry setup ─────────────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    host          = entry.data[CONF_PS4_HOST]
+    host           = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
-    ftp_port      = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
-    rpi_port      = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
-    klog_port     = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
+    ftp_port       = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
+    rpi_port       = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
+    klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
     async def _poll_ftp() -> dict[str, Any]:
         try:
@@ -540,7 +533,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     root = _ensure_domain_root(hass)
 
-    # Cancel any stale klog task from a previous load
     prev = root.get(entry.entry_id)
     if isinstance(prev, dict):
         for task_key in ("klog_task", "db_task"):
@@ -552,12 +544,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     state_machine = KlogStateMachine()
 
     root[entry.entry_id] = {
-        "coordinator":      coordinator,
-        "host":             host,
-        "binloader_port":   binloader_port,
-        "ftp_port":         ftp_port,
-        "rpi_port":         rpi_port,
-        "klog_port":        klog_port,
+        "coordinator":        coordinator,
+        "host":               host,
+        "binloader_port":     binloader_port,
+        "ftp_port":           ftp_port,
+        "rpi_port":           rpi_port,
+        "klog_port":          klog_port,
         "klog_state_machine": state_machine,
         "klog_data": {
             **state_machine.snapshot(),
@@ -565,10 +557,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SENSOR_GAME_NAME:  None,
             SENSOR_GAME_COVER: None,
         },
-        "game_map": {},   # populated by _db_refresh_task
+        "game_map": {},
     }
 
-    # Klog listener
     klog_task = entry.async_create_background_task(
         hass,
         _klog_listener_task(hass, entry.entry_id, host, klog_port, coordinator),
@@ -576,7 +567,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     root[entry.entry_id]["klog_task"] = klog_task
 
-    # app.db refresh (runs immediately, then every DB_REFRESH_INTERVAL seconds)
     db_task = entry.async_create_background_task(
         hass,
         _db_refresh_task(hass, entry.entry_id, coordinator),
@@ -589,7 +579,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not g["ws_registered"]:
         websocket_api.async_register_command(hass, ws_list_entries)
         websocket_api.async_register_command(hass, ws_list_payloads)
-
         from .websocket import async_setup as async_setup_websocket
         async_setup_websocket(hass)
         g["ws_registered"] = True
@@ -599,6 +588,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not g.get("bundled_payloads_installed"):
         await hass.async_add_executor_job(_copy_bundled_payloads_to_config)
         g["bundled_payloads_installed"] = True
+
+    # Register HTTP views once across all entries
+    if not g.get("cover_view_registered"):
+        hass.http.register_view(PS4FTPDownloadView())
+        hass.http.register_view(PS4FTPUploadView())
+        hass.http.register_view(PS4GameCoverView())
+        g["cover_view_registered"] = True
 
     _SEND_PAYLOAD_SCHEMA = vol.Schema(
         {
@@ -614,9 +610,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     async def handle_send_payload(call: ServiceCall) -> None:
-        p_file  = call.data["payload_file"]
-        t_host  = call.data.get("ps4_host") or host
-        t_port  = int(call.data.get("binloader_port") or binloader_port)
+        p_file   = call.data["payload_file"]
+        t_host   = call.data.get("ps4_host") or host
+        t_port   = int(call.data.get("binloader_port") or binloader_port)
         filepath = (
             p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
         )
@@ -627,9 +623,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
             schema=_SEND_PAYLOAD_SCHEMA,
         )
-
-    hass.http.register_view(PS4FTPDownloadView())
-    hass.http.register_view(PS4FTPUploadView())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -724,6 +717,47 @@ class PS4FTPUploadView(HomeAssistantView):
             return web.json_response({"success": True, "path": full_dest})
         except Exception as err:
             return web.Response(text=f"FTP Upload Error: {err}", status=500)
+
+
+class PS4GameCoverView(HomeAssistantView):
+    """Proxy PS4 game cover images from FTP to the HA dashboard."""
+    url = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
+    name = "api:ps4_goldhen:cover"
+    requires_auth = True
+
+    async def get(
+        self, request: web.Request, entry_id: str, title_id: str
+    ) -> web.Response:
+        import ftplib
+
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
+        if not data:
+            return web.Response(text="Entry not found", status=404)
+
+        tid = title_id.strip().upper()
+
+        # Prefer the cover path stored in game_map, fall back to standard PS4 path
+        game_info = data.get("game_map", {}).get(tid, {})
+        cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
+
+        def _fetch_cover():
+            buf = io.BytesIO()
+            with ftplib.FTP() as ftp:
+                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
+                ftp.login()
+                ftp.retrbinary(f"RETR {cover_path}", buf.write)
+            return buf.getvalue()
+
+        try:
+            img_bytes = await request.app["hass"].async_add_executor_job(_fetch_cover)
+            return web.Response(
+                body=img_bytes,
+                content_type="image/png",
+                headers={"Cache-Control": "max-age=86400"},
+            )
+        except Exception as err:
+            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
+            return web.Response(text=f"Cover not found: {err}", status=404)
 
 
 # ── Teardown ───────────────────────────────────────────────────────────────────
