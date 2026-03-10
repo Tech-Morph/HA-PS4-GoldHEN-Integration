@@ -21,9 +21,9 @@ from .const import (
 )
 
 _HOME_SCREEN_STATE = HOME_SCREEN
-_IDLE_STATE = "Idle"
-_REST_MODE_STATE = "Rest Mode"
-_OFF_STATE = "Off"
+_IDLE_STATE        = "Idle"
+_REST_MODE_STATE   = "Rest Mode"
+_OFF_STATE         = "Off"
 
 _PI_STATE_SENSOR = "sensor.ps4_state_pi"
 
@@ -34,7 +34,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-
     async_add_entities(
         [
             PS4FTPStatusSensor(coordinator, entry),
@@ -93,7 +92,7 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     def _ps4_state(self) -> str:
         data = self.coordinator.data or {}
-        tid = data.get(SENSOR_TITLE_ID)
+        tid  = data.get(SENSOR_TITLE_ID)
         if not tid:
             return _HOME_SCREEN_STATE
         name = data.get(SENSOR_GAME_NAME)
@@ -112,33 +111,37 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def entity_picture(self) -> str | None:
-        """
-        Exposes the proxied cover image URL so HA uses it automatically
-        in entity cards, the logbook, and the states UI.
-        Returns None when no game is active (home screen / rest / off).
-        """
+        """HA uses this to show cover art automatically in entity/logbook cards."""
         data = self.coordinator.data or {}
-        tid = data.get(SENSOR_TITLE_ID)
+        tid  = data.get(SENSOR_TITLE_ID)
         if not tid:
             return None
         return f"/api/ps4_goldhen/cover/{self._entry_id}/{tid}"
 
     @property
     def extra_state_attributes(self) -> dict:
-        data = self.coordinator.data or {}
-        val  = self.native_value
-        tid  = data.get(SENSOR_TITLE_ID)
+        data     = self.coordinator.data or {}
+        val      = self.native_value
+        tid      = data.get(SENSOR_TITLE_ID)
+
+        game_map  = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry_id, {})
+            .get("game_map", {})
+        )
+        game_info = game_map.get(tid, {}) if tid else {}
 
         return {
-            SENSOR_TITLE_ID:   tid,
-            SENSOR_GAME_NAME:  data.get(SENSOR_GAME_NAME),
-            SENSOR_GAME_COVER: data.get(SENSOR_GAME_COVER),
+            SENSOR_TITLE_ID:    tid,
+            SENSOR_GAME_NAME:   data.get(SENSOR_GAME_NAME),
+            SENSOR_GAME_COVER:  data.get(SENSOR_GAME_COVER),
+            "cdn_cover":        game_info.get("cdn_cover"),
             "cover_url": (
                 f"/api/ps4_goldhen/cover/{self._entry_id}/{tid}" if tid else None
             ),
             "state_classification": (
-                "rest"        if val == _REST_MODE_STATE else
-                "off"         if val == _OFF_STATE       else
+                "rest"        if val == _REST_MODE_STATE  else
+                "off"         if val == _OFF_STATE        else
                 "home_screen" if val == _HOME_SCREEN_STATE else
                 "game"
             ),
