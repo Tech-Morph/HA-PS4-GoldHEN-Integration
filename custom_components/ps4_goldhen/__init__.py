@@ -44,6 +44,8 @@ from .const import (
     SENSOR_TITLE_ID,
     SENSOR_GAME_NAME,
     SENSOR_GAME_COVER,
+    SENSOR_KLOG_LAST_LINE,
+    EVENT_KLOG_LINE,
     HOME_SCREEN,
     APP_DB_REMOTE,
     APP_DB_LOCAL,
@@ -339,12 +341,21 @@ class KlogStateMachine:
 
 # ── Klog line parser ───────────────────────────────────────────────────────────
 
-def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
+def _parse_klog_line(
+    hass: HomeAssistant, line: str, entry_data: dict[str, Any], entry_id: str
+) -> bool:
     state_machine: KlogStateMachine = entry_data["klog_state_machine"]
+
+    # noise-filter before any processing
+    for pattern in _KLOG_NOISE_PATTERNS:
+        if pattern.search(line):
+            return False
+
     state_changed = state_machine.ingest(line)
 
     klog_data = entry_data["klog_data"]
     klog_data.update(state_machine.snapshot())
+    klog_data[SENSOR_KLOG_LAST_LINE] = line[:300]
 
     tid = klog_data.get(SENSOR_TITLE_ID)
     if tid:
@@ -359,6 +370,16 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
     if m:
         with contextlib.suppress(ValueError):
             klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
+
+    # ── Fire HA event for every non-noise klog line ────────────────────────
+    hass.bus.async_fire(
+        EVENT_KLOG_LINE,
+        {
+            "entry_id":  entry_id,
+            "message":   line[:300],
+            "title_id":  klog_data.get(SENSOR_TITLE_ID),
+        },
+    )
 
     return state_changed
 
@@ -408,7 +429,7 @@ async def _klog_listener_task(
                 changed = False
                 for line in lines[:-1]:
                     line = line.rstrip("\r")
-                    if line and _parse_klog_line(line, entry_data):
+                    if line and _parse_klog_line(hass, line, entry_data, entry_id):
                         changed = True
 
                 if changed:
@@ -582,10 +603,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_state_machine": state_machine,
         "klog_data": {
             **state_machine.snapshot(),
-            SENSOR_CPU_TEMP:   None,
-            SENSOR_GAME_NAME:  None,
-            SENSOR_GAME_COVER: None,
-            "ftp_reachable":   False,
+            SENSOR_CPU_TEMP:        None,
+            SENSOR_GAME_NAME:       None,
+            SENSOR_GAME_COVER:      None,
+            SENSOR_KLOG_LAST_LINE:  None,
+            "ftp_reachable":        False,
         },
         "game_map": {},
     }
