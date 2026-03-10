@@ -14,10 +14,13 @@ from .const import (
     CONF_PS4_HOST,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
+    SENSOR_TITLE_ID,
+    SENSOR_GAME_NAME,
+    SENSOR_GAME_COVER,
+    HOME_SCREEN,
 )
 
-_HOME_SCREEN_STATE = "PlayStation Home Screen"
+_HOME_SCREEN_STATE = HOME_SCREEN
 _IDLE_STATE = "Idle"
 _REST_MODE_STATE = "Rest Mode"
 _OFF_STATE = "Off"
@@ -38,7 +41,6 @@ async def async_setup_entry(
             PS4FTPStatusSensor(coordinator, entry),
             PS4CurrentGameSensor(coordinator, entry),
             PS4CPUTempSensor(coordinator, entry),
-            PS4RSXTempSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -126,7 +128,9 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         val = self.native_value
 
         return {
-            "title_id": data.get("title_id"),
+            SENSOR_TITLE_ID: data.get(SENSOR_TITLE_ID),
+            SENSOR_GAME_NAME: data.get(SENSOR_GAME_NAME),
+            SENSOR_GAME_COVER: data.get(SENSOR_GAME_COVER),
             "state_classification": (
                 "rest" if val == _REST_MODE_STATE
                 else "off" if val == _OFF_STATE
@@ -158,22 +162,4 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
-        return float(temp) if temp is not None else None
-
-
-class PS4RSXTempSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "RSX Temperature"
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_icon = "mdi:thermometer"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_rsx_temp"
-
-    @property
-    def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
-        temp = data.get(SENSOR_RSX_TEMP)
         return float(temp) if temp is not None else None
