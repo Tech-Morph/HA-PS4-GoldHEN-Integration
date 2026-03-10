@@ -91,9 +91,8 @@ data:
   - FTP (default port `2121`)
   - BinLoader (default port `9090`)
   - Klog / Debug Log Server (default port `3232`)
-- *(Optional)* A Raspberry Pi or other device running a REST sensor at `sensor.ps4_state_pi` reporting `on` / `rest` / `offline` for accurate power state detection
-  <a href="[https://example.org](https://github.com/Tech-Morph/PS4-State-Monitor)">
-PS4 State Monitor</a>.
+- *(Optional)* A Raspberry Pi or other device running a REST sensor at `sensor.ps4_state_pi` reporting `on` / `rest` / `offline` for accurate power state detection [PS4 State Monitor]([https://github.com/username/repo-name](https://github.com/Tech-Morph/PS4-State-Monitor))
+
 
 ---
 
