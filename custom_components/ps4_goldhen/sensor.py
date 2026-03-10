@@ -21,7 +21,7 @@ _IDLE_STATE = "Idle"
 _REST_MODE_STATE = "Rest Mode"
 _OFF_STATE = "Off"
 
-# Entity ID of your Pi-based REST sensor
+# Pi power-state sensor
 _PI_STATE_SENSOR = "sensor.ps4_state_pi"
 
 
@@ -61,9 +61,8 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     """
     Reports the current PS4 state.
 
-    Power state (rest/off) comes from sensor.ps4_state_pi.
-    Game/home state comes from the klog state machine.
-    The Pi sensor overrides klog for power state — klog is only used when Pi says 'On'.
+    Power state comes from sensor.ps4_state_pi.
+    Game state comes from klog state machine.
     """
 
     _attr_has_entity_name = True
@@ -78,7 +77,6 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
-        # Seed immediately from current Pi state
         pi = self.hass.states.get(_PI_STATE_SENSOR)
         if pi:
             self._pi_state = pi.state
@@ -99,11 +97,12 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
             self.async_write_ha_state()
 
     def _klog_state(self) -> str:
-        """Raw klog-derived state (title ID or home screen label)."""
         data = self.coordinator.data or {}
         val = data.get(SENSOR_CURRENT_GAME)
+
         if isinstance(val, str) and val.strip():
             return val.strip()
+
         return _HOME_SCREEN_STATE
 
     @property
@@ -112,10 +111,10 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
         if pi == "rest":
             return _REST_MODE_STATE
+
         if pi == "offline":
             return _OFF_STATE
 
-        # Pi says 'on' (or unknown) — trust klog
         return self._klog_state()
 
     @property
@@ -126,10 +125,14 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         return {
             "title_id": data.get("title_id"),
             "state_classification": (
-                "rest" if val == _REST_MODE_STATE
-                else "off" if val == _OFF_STATE
-                else "home_screen" if val == _HOME_SCREEN_STATE
-                else "idle" if val == _IDLE_STATE
+                "rest"
+                if val == _REST_MODE_STATE
+                else "off"
+                if val == _OFF_STATE
+                else "home_screen"
+                if val == _HOME_SCREEN_STATE
+                else "idle"
+                if val == _IDLE_STATE
                 else "game"
             ),
             "pi_state": self._pi_state,
@@ -156,4 +159,8 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
         temp = data.get(SENSOR_CPU_TEMP)
-        return float(temp) if temp is not None else None
+
+        if temp is None:
+            return None
+
+        return float(temp)
