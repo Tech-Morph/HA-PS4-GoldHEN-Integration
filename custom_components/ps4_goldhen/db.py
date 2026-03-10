@@ -40,7 +40,13 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> dict[str, str]:
 def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
     """
     Parse raw app.db bytes.
-    Returns { titleId: {"name": str, "cover": str | None} }
+    Returns {
+        titleId: {
+            "name":      str,
+            "cover":     str | None,   # FTP path to icon0.png on the PS4
+            "cdn_cover": str | None,   # Sony CDN https:// URL (may be None/empty)
+        }
+    }
     """
     game_map: dict[str, dict[str, Any]] = {}
     tmp_path = ""
@@ -76,22 +82,17 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                     )
                     continue
 
-                tid_col  = cols["titleid"]
-                name_col = cols["titlename"]
-
-                cover_col = (
-                    cols.get("thumbnailurl")
-                    or cols.get("metadatapath")
-                )
-                vis_col = cols.get("visible")
+                tid_col      = cols["titleid"]
+                name_col     = cols["titlename"]
+                cdn_cover_col = cols.get("thumbnailurl")   # Sony CDN URL
+                vis_col      = cols.get("visible")
 
                 select_cols = f'"{tid_col}", "{name_col}"'
-                if cover_col:
-                    select_cols += f', "{cover_col}"'
+                if cdn_cover_col:
+                    select_cols += f', "{cdn_cover_col}"'
 
                 where = f'WHERE "{vis_col}" = 1' if vis_col else ""
                 query = f'SELECT {select_cols} FROM "{table}" {where}'
-
                 _LOGGER.debug("Executing: %s", query)
 
                 try:
@@ -103,15 +104,30 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                 _LOGGER.debug("Table %s returned %d rows", table, len(rows))
 
                 for row in rows:
-                    tid   = str(row[0]).strip().upper() if row[0] else None
-                    tname = str(row[1]).strip()         if row[1] else None
-                    cover = str(row[2]).strip()         if cover_col and len(row) > 2 and row[2] else None
+                    tid  = str(row[0]).strip().upper() if row[0] else None
+                    tname = str(row[1]).strip()        if row[1] else None
+                    cdn  = (
+                        str(row[2]).strip()
+                        if cdn_cover_col and len(row) > 2 and row[2]
+                        else None
+                    )
 
                     if not tid or not tname:
                         continue
 
+                    # Discard values that aren't real CDN URLs
+                    if cdn and not cdn.startswith("http"):
+                        cdn = None
+
+                    # Always build the standard FTP icon path as fallback
+                    ftp_cover = f"/user/appmeta/{tid}/icon0.png"
+
                     if tid not in game_map:
-                        game_map[tid] = {"name": tname, "cover": cover}
+                        game_map[tid] = {
+                            "name":      tname,
+                            "cover":     ftp_cover,   # FTP path — used by cover proxy
+                            "cdn_cover": cdn,          # CDN URL — used for redirect
+                        }
 
         finally:
             conn.close()
@@ -153,4 +169,3 @@ def download_and_parse(host: str, port: int) -> dict[str, dict[str, Any]]:
                 continue
 
     raise FileNotFoundError("Could not download app.db from PS4 FTP")
-
