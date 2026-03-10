@@ -1,7 +1,7 @@
 {
   "domain": "ps4_goldhen",
   "name": "PS4 GoldHEN",
-  "codeowners": [],
+  "codeowners": ["@Tech-Morph"],
   "config_flow": true,
   "dependencies": ["http", "frontend"],
   "documentation": "https://github.com/Tech-Morph/HA-PS4-GoldHEN-Integration",
