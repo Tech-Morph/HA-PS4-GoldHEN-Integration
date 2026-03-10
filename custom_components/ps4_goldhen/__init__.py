@@ -268,16 +268,28 @@ class KlogStateMachine:
             if pattern.search(line):
                 return False
 
+        # ── [SL] AppFocusChanged ───────────────────────────────────────────
         m = _KLOG_SL_FOCUS_PATTERN.search(line)
         if m:
             new_app = m.group(2).strip().upper()
             if _is_real_game_title_id(new_app):
+                # Confirmed game in foreground — clear pending and set state
                 return self._set(new_app, "sl_focus_game", line)
             elif new_app == _HOME_SCREEN_APP_ID:
+                # Only clear to home screen if no launch is in progress.
+                # During app launch the PS4 fires a transient home focus
+                # signal before the game takes over — ignore it.
+                if self._pending_launch:
+                    _LOGGER.debug(
+                        "Ignoring sl_focus_home — launch pending for %s",
+                        self._pending_launch,
+                    )
+                    return False
                 if self.current_title_id is not None:
                     return self._set(None, "sl_focus_home", line)
             return False
 
+        # ── [BGFT] GameWillStart ───────────────────────────────────────────
         m = _KLOG_BGFT_GAME_START.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -285,6 +297,7 @@ class KlogStateMachine:
                 self._pending_launch = tid
                 return self._set(tid, "bgft_game_will_start", line)
 
+        # ── [SceLncService] launchApp ──────────────────────────────────────
         m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -294,17 +307,27 @@ class KlogStateMachine:
                 self.last_signal_line = line[-300:]
                 return False
 
+        # ── Game Close detected ────────────────────────────────────────────
         if _KLOG_GAME_CLOSE_PATTERN.search(line):
             if self.current_title_id is not None:
                 return self._set(None, "game_close_detected", line)
 
+        # ── [BGFT] GameStopped ─────────────────────────────────────────────
         m = _KLOG_BGFT_GAME_STOPPED.search(line)
         if m:
             tid = m.group(1).strip().upper()
             if self.current_title_id == tid:
                 return self._set(None, "bgft_game_stopped", line)
 
+        # ── ApplicationExitScene → ContentAreaScene ────────────────────────
         if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
+            # Same guard — ignore exit-to-home during a pending launch
+            if self._pending_launch:
+                _LOGGER.debug(
+                    "Ignoring exit_scene_to_home — launch pending for %s",
+                    self._pending_launch,
+                )
+                return False
             if self.current_title_id is not None:
                 return self._set(None, "exit_scene_to_home", line)
 
