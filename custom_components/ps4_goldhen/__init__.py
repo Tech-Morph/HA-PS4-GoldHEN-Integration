@@ -720,10 +720,18 @@ class PS4FTPUploadView(HomeAssistantView):
 
 
 class PS4GameCoverView(HomeAssistantView):
-    """Proxy PS4 game cover images from FTP to the HA dashboard."""
+    """
+    Proxy PS4 game cover images to the HA dashboard.
+
+    Strategy (in order):
+      1. If the game_map has a Sony CDN URL → 302 redirect directly to it.
+         Browser fetches the image from Sony, zero FTP involved.
+      2. Otherwise → FTP-fetch /user/appmeta/<TITLEID>/icon0.png from the PS4
+         and stream it back.
+    """
     url = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
     name = "api:ps4_goldhen:cover"
-    requires_auth = False  # ← FIXED: browser fetches img src without HA token
+    requires_auth = False  # img src requests never carry HA auth token
 
     async def get(
         self, request: web.Request, entry_id: str, title_id: str
@@ -735,8 +743,14 @@ class PS4GameCoverView(HomeAssistantView):
             return web.Response(text="Entry not found", status=404)
 
         tid = title_id.strip().upper()
-
         game_info = data.get("game_map", {}).get(tid, {})
+
+        # ── 1. CDN redirect (fast path) ────────────────────────────────────
+        cdn_url = game_info.get("cdn_cover")
+        if cdn_url and cdn_url.startswith("http"):
+            raise web.HTTPFound(cdn_url)  # 302 redirect — browser fetches directly
+
+        # ── 2. FTP fallback ────────────────────────────────────────────────
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
 
         def _fetch_cover():
@@ -755,9 +769,8 @@ class PS4GameCoverView(HomeAssistantView):
                 headers={"Cache-Control": "max-age=86400"},
             )
         except Exception as err:
-            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
+            _LOGGER.debug("Cover FTP fetch failed for %s: %s", tid, err)
             return web.Response(text=f"Cover not found: {err}", status=404)
-
 
 # ── Teardown ───────────────────────────────────────────────────────────────────
 
