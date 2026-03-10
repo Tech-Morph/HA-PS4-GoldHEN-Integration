@@ -19,7 +19,7 @@ A fully local Home Assistant integration and sidebar panel for managing a **PS4 
 |---|---|
 | **Current Game** | Resolved game title from the PS4's `app.db` (e.g. `God of War`) — falls back to Title ID if DB hasn't loaded yet. State reflects `Rest Mode`, `Off`, or `PlayStation Home Screen` automatically. |
 | **FTP Status** | `online` / `offline` based on a TCP probe to the PS4 FTP port every 30 seconds. |
-| **CPU Temperature** | Real-time CPU temp parsed from the GoldHEN klog stream (°C). |
+| (WIP) **CPU Temperature** | Real-time CPU temp parsed from the GoldHEN klog stream (°C). |
 
 **Current Game** extra attributes:
 
