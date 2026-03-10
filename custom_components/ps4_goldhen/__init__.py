@@ -68,69 +68,50 @@ _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
 
-_KLOG_LAUNCH_PATTERNS = (
-    re.compile(r"launchApp\(\)\s*titleId=\[?([A-Z]{4}\d{5})\]?", re.IGNORECASE),
-    re.compile(r"launchApp\(([A-Z]{4}\d{5})\)", re.IGNORECASE),
-    re.compile(r"GameStartBoot\(([A-Z]{4}\d{5}),", re.IGNORECASE),
-    re.compile(r"GameWillStart\(([A-Z]{4}\d{5}),", re.IGNORECASE),
-    re.compile(r"createApp\s+([A-Z]{4}\d{5})", re.IGNORECASE),
-    re.compile(r"title_id='([A-Z]{4}\d{5})'", re.IGNORECASE),
-    re.compile(r"titleId\s*=\s*([A-Z]{4}\d{5})", re.IGNORECASE),
-)
-
-_KLOG_FOCUS_PATTERN = re.compile(
-    r"AppFocusChanged\s+\[?([A-Z0-9]+)\]?\s*(?:->|-)\s*\[?([A-Z0-9]+)\]?",
+# ── Primary signals ────────────────────────────────────────────────────────────
+# "[SL] AppFocusChanged [OLD] -> [NEW]"  (the [SL] logger is ground truth)
+_KLOG_SL_FOCUS_PATTERN = re.compile(
+    r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
     re.IGNORECASE,
 )
 
-_KLOG_HOME_SCENE_PATTERNS = (
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+\[AppScreen\s*:\s*ApplicationScreenScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+AppScreen\s+ApplicationScreenScene\s*-\s*ContentAreaScene\s+ContentAreaScene",
-        re.IGNORECASE,
-    ),
-)
-
-_KLOG_GAME_SCENE_PATTERNS = (
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+\[ContentAreaScene\s*:\s*ContentAreaScene\]\s*->\s*\[AppScreen\s*:\s*ApplicationScreenScene\]",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"OnFocusActiveSceneChanged\s+ContentAreaScene\s+ContentAreaScene\s*-\s*AppScreen\s+ApplicationScreenScene",
-        re.IGNORECASE,
-    ),
-)
-
-_KLOG_IDLE_PATTERNS = (
-    re.compile(r"Power Mode Change:\s*STANDBY", re.IGNORECASE),
-    re.compile(r"Power Mode Change:\s*REST", re.IGNORECASE),
-    re.compile(r"Power Mode Change:\s*OFF", re.IGNORECASE),
-    re.compile(r"Power Mode Change:\s*SUSPEND", re.IGNORECASE),
-)
-
-_KLOG_SHELL_FG_PATTERN = re.compile(r"ShellUI is Fg", re.IGNORECASE)
-_KLOG_SHELL_BG_PATTERN = re.compile(r"ShellUI is Bg", re.IGNORECASE)
-_KLOG_VCS_SHELL_FOCUS_PATTERN = re.compile(
-    r"Focus Change\..*appType\s*=?\s*1\s*\(?SHELL[_ ]?UI\)?",
+# launchApp from SceLncService — fires before focus, good early signal
+_KLOG_LNC_LAUNCH_PATTERN = re.compile(
+    r"\[SceLncService\]\s+launchApp\(([A-Z]{4}\d{5})\)",
     re.IGNORECASE,
 )
-_KLOG_VCS_BIGAPP_FOCUS_PATTERN = re.compile(
-    r"Focus Change\..*appType\s*=?\s*5\s*\(?BIG[_ ]?APP\)?",
+
+# Game fully started (BGFT fires after binary is loaded)
+_KLOG_BGFT_GAME_START = re.compile(
+    r"\[BGFT\].*GameWillStart\(([A-Z]{4}\d{5}),",
     re.IGNORECASE,
 )
-_KLOG_RESUME_APP_PATTERN = re.compile(r"resumeApp\(\)\s*appId", re.IGNORECASE)
-_KLOG_SUSPEND_APP_PATTERN = re.compile(r"suspendApp\(\)\s*appId", re.IGNORECASE)
 
+# Game closed — fires when user quits the app
+_KLOG_GAME_CLOSE_PATTERN = re.compile(r"Game Close detected", re.IGNORECASE)
+_KLOG_BGFT_GAME_STOPPED = re.compile(
+    r"\[BGFT\].*GameStopped\(([A-Z]{4}\d{5}),",
+    re.IGNORECASE,
+)
+
+# Back to home after app exit:
+# "[SceShellUI] OnFocusActiveSceneChanged [ApplicationExitScene : ApplicationExitScene] -> [ContentAreaScene : ContentAreaScene]"
+_KLOG_EXIT_TO_HOME_PATTERN = re.compile(
+    r"OnFocusActiveSceneChanged\s+\[ApplicationExitScene\s*:\s*ApplicationExitScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
+    re.IGNORECASE,
+)
+
+# ── Noise filter ───────────────────────────────────────────────────────────────
 _KLOG_NOISE_PATTERNS = (
     re.compile(r"\bD88391\b", re.IGNORECASE),
     re.compile(r"\bfrom tbl_appbrowse_", re.IGNORECASE),
     re.compile(r"\bfrom tblappbrowse", re.IGNORECASE),
     re.compile(r"^\s*<\d+>\s*=+ bindValue", re.IGNORECASE),
     re.compile(r"^\s*<\d+>\s*=+ sql\s*=", re.IGNORECASE),
+    re.compile(r"^\s*======== sql\s*=", re.IGNORECASE),
+    re.compile(r"^\s*======== bindValue", re.IGNORECASE),
+    re.compile(r"^\s*======== limit\s*=", re.IGNORECASE),
+    re.compile(r"uhub\d+: giving up port", re.IGNORECASE),
 )
 
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
@@ -263,128 +244,103 @@ def _is_real_game_title_id(value: str | None) -> bool:
 
 
 class KlogStateMachine:
-    """Resolve the current PS4 foreground state from the full live klog stream."""
+    """
+    Resolve the current PS4 foreground state from the klog stream.
+
+    Signal priority (highest → lowest):
+      1. [SL] AppFocusChanged [OLD] -> [NEW]   ← ground truth for foreground app
+      2. [BGFT] GameWillStart(TITLEID, …)       ← game binary loaded & starting
+      3. [SceLncService] launchApp(TITLEID)     ← early launch signal
+      4. Game Close detected / GameStopped      ← game exited
+      5. OnFocusActiveSceneChanged …Exit→Content← back to home after close
+    """
 
     def __init__(self) -> None:
-        self.current_state = _HOME_SCREEN_STATE
+        self.current_title_id: str | None = None   # None = home screen
         self.last_reason = "init"
         self.last_signal_line = ""
-        self.pending_title_id: str | None = None
-        self.pending_reason: str | None = None
-        self.pending_expires_at = 0.0
         self.recent_lines: deque[str] = deque(maxlen=250)
+        self.klog_connected: bool = True
+
+        # Pending launch: we saw launchApp but not yet [SL] AppFocusChanged
+        self._pending_launch: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        state = self.current_title_id if self.current_title_id else _HOME_SCREEN_STATE
         return {
-            SENSOR_CURRENT_GAME: self.current_state,
+            SENSOR_CURRENT_GAME: state,
+            "title_id": self.current_title_id,
             "state_reason": self.last_reason,
             "state_signal_line": self.last_signal_line,
-            "pending_title_id": self.pending_title_id,
-            "pending_reason": self.pending_reason,
+            "pending_title_id": self._pending_launch,
+            "klog_connected": self.klog_connected,
         }
 
-    def _set_state(self, state: str, reason: str, line: str) -> bool:
-        changed = (
-            self.current_state != state
-            or self.last_reason != reason
-            or self.last_signal_line != line[-300:]
-        )
-        self.current_state = state
-        self.last_reason = reason
-        self.last_signal_line = line[-300:]
-
-        if state in (_HOME_SCREEN_STATE, _IDLE_STATE):
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
-        elif _is_real_game_title_id(state):
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
-
-        return changed
-
-    def _queue_game(self, title_id: str, reason: str, line: str) -> bool:
-        title_id = title_id.upper()
-        if not _is_real_game_title_id(title_id):
-            return False
-        self.pending_title_id = title_id
-        self.pending_reason = reason
-        self.pending_expires_at = time.monotonic() + 15.0
-        self.last_reason = reason
-        self.last_signal_line = line[-300:]
-        return False
-
-    def _pending_game_is_alive(self) -> bool:
-        return bool(self.pending_title_id) and time.monotonic() <= self.pending_expires_at
-
-    def _clear_expired_pending(self) -> None:
-        if self.pending_title_id and time.monotonic() > self.pending_expires_at:
-            self.pending_title_id = None
-            self.pending_reason = None
-            self.pending_expires_at = 0.0
-
     def ingest(self, line: str) -> bool:
+        """Process one klog line. Returns True if state changed."""
         self.recent_lines.append(line[-300:])
-        self._clear_expired_pending()
+        self.klog_connected = True
 
-        for pattern in _KLOG_IDLE_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_IDLE_STATE, "power_idle", line)
-
+        # Fast-path: skip noise
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line):
                 return False
 
-        match = _KLOG_FOCUS_PATTERN.search(line)
-        if match:
-            old_app = match.group(1).strip().upper()
-            new_app = match.group(2).strip().upper()
-
-            if new_app == _HOME_SCREEN_APP_ID:
-                return self._set_state(_HOME_SCREEN_STATE, "focus_to_home", line)
-
+        # ── 1. [SL] AppFocusChanged — GROUND TRUTH ────────────────────────────
+        m = _KLOG_SL_FOCUS_PATTERN.search(line)
+        if m:
+            new_app = m.group(2).strip().upper()
             if _is_real_game_title_id(new_app):
-                return self._set_state(new_app, "focus_to_game", line)
+                return self._set(new_app, "sl_focus_game", line)
+            elif new_app == _HOME_SCREEN_APP_ID:
+                if self.current_title_id is not None:
+                    return self._set(None, "sl_focus_home", line)
+            return False
 
-            if old_app == _HOME_SCREEN_APP_ID and _is_real_game_title_id(new_app):
-                return self._set_state(new_app, "focus_home_to_game", line)
+        # ── 2. [BGFT] GameWillStart — game binary is loaded ───────────────────
+        m = _KLOG_BGFT_GAME_START.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if _is_real_game_title_id(tid):
+                self._pending_launch = tid
+                return self._set(tid, "bgft_game_will_start", line)
 
-        for pattern in _KLOG_LAUNCH_PATTERNS:
-            match = pattern.search(line)
-            if match:
-                title_id = match.group(1).strip().upper()
-                if _is_real_game_title_id(title_id):
-                    return self._queue_game(title_id, "launch_hint", line)
+        # ── 3. [SceLncService] launchApp — early indicator ────────────────────
+        m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if _is_real_game_title_id(tid):
+                self._pending_launch = tid
+                # Don't commit yet — wait for [SL] AppFocusChanged or GameWillStart
+                self.last_reason = "lnc_launch_pending"
+                self.last_signal_line = line[-300:]
+                return False
 
-        if self._pending_game_is_alive():
-            if _KLOG_VCS_BIGAPP_FOCUS_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "bigapp_focus_confirmed", line)
+        # ── 4. Game closed ────────────────────────────────────────────────────
+        if _KLOG_GAME_CLOSE_PATTERN.search(line):
+            if self.current_title_id is not None:
+                return self._set(None, "game_close_detected", line)
 
-            for pattern in _KLOG_GAME_SCENE_PATTERNS:
-                if pattern.search(line):
-                    return self._set_state(self.pending_title_id, "scene_game_confirmed", line)
+        m = _KLOG_BGFT_GAME_STOPPED.search(line)
+        if m:
+            tid = m.group(1).strip().upper()
+            if self.current_title_id == tid:
+                return self._set(None, "bgft_game_stopped", line)
 
-            if _KLOG_RESUME_APP_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "resume_confirmed", line)
-
-            if _KLOG_SHELL_BG_PATTERN.search(line):
-                return self._set_state(self.pending_title_id, "shell_bg_game_confirmed", line)
-
-        for pattern in _KLOG_HOME_SCENE_PATTERNS:
-            if pattern.search(line):
-                return self._set_state(_HOME_SCREEN_STATE, "scene_home_confirmed", line)
-
-        if _KLOG_VCS_SHELL_FOCUS_PATTERN.search(line):
-            return self._set_state(_HOME_SCREEN_STATE, "shell_focus_confirmed", line)
-
-        if _KLOG_SHELL_FG_PATTERN.search(line):
-            return self._set_state(_HOME_SCREEN_STATE, "shell_fg_confirmed", line)
-
-        if _KLOG_SUSPEND_APP_PATTERN.search(line) and self.current_state not in (_HOME_SCREEN_STATE, _IDLE_STATE):
-            return self._set_state(_HOME_SCREEN_STATE, "suspend_to_home_hint", line)
+        # ── 5. Exit scene → ContentArea = back to home screen ─────────────────
+        if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
+            if self.current_title_id is not None:
+                return self._set(None, "exit_scene_to_home", line)
 
         return False
+
+    def _set(self, title_id: str | None, reason: str, line: str) -> bool:
+        changed = self.current_title_id != title_id
+        self.current_title_id = title_id
+        self._pending_launch = None
+        self.last_reason = reason
+        self.last_signal_line = line[-300:]
+        return changed
 
 
 def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
@@ -395,19 +351,15 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
     klog_data = entry_data["klog_data"]
     klog_data.update(state_machine.snapshot())
 
-    match = _KLOG_CPU_TEMP_PATTERN.search(line)
-    if match:
-        try:
-            klog_data[SENSOR_CPU_TEMP] = float(match.group(1))
-        except ValueError:
-            pass
+    m = _KLOG_CPU_TEMP_PATTERN.search(line)
+    if m:
+        with contextlib.suppress(ValueError):
+            klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
 
-    match = _KLOG_RSX_TEMP_PATTERN.search(line)
-    if match:
-        try:
-            klog_data[SENSOR_RSX_TEMP] = float(match.group(1))
-        except ValueError:
-            pass
+    m = _KLOG_RSX_TEMP_PATTERN.search(line)
+    if m:
+        with contextlib.suppress(ValueError):
+            klog_data[SENSOR_RSX_TEMP] = float(m.group(1))
 
     return state_changed
 
@@ -427,51 +379,62 @@ async def _klog_listener_task(
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
             _LOGGER.info("Connected to klog at %s:%d", host, port)
 
+            entry_data = hass.data[DOMAIN].get(entry_id)
+            if entry_data:
+                entry_data["klog_state_machine"].klog_connected = True
+
             text_buffer = ""
 
             while True:
-                chunk = await asyncio.wait_for(reader.read(4096), timeout=30)
+                try:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=30.0)
+                except asyncio.TimeoutError:
+                    continue
+
                 if not chunk:
                     _LOGGER.warning("Klog connection closed by PS4")
                     break
 
                 text_buffer += chunk.decode("utf-8", errors="replace")
-                parts = re.split(r"\r\n|\n|\r", text_buffer)
-                text_buffer = parts.pop() if parts else ""
+                lines = text_buffer.split("\n")
+                text_buffer = lines[-1]
 
-                for line in parts:
-                    if not line:
-                        continue
-
-                    entry_data = hass.data[DOMAIN].get(entry_id)
-                    if not entry_data or "klog_data" not in entry_data:
-                        continue
-
-                    _parse_klog_line(line, entry_data)
-                    coordinator.async_set_updated_data(
-                        {**(coordinator.data or {}), **entry_data["klog_data"]}
-                    )
-
-            if text_buffer:
                 entry_data = hass.data[DOMAIN].get(entry_id)
-                if entry_data and "klog_data" in entry_data:
-                    _parse_klog_line(text_buffer, entry_data)
+                if not entry_data:
+                    break
+
+                changed = False
+                for line in lines[:-1]:
+                    line = line.rstrip("\r")
+                    if line:
+                        if _parse_klog_line(line, entry_data):
+                            changed = True
+
+                if changed:
                     coordinator.async_set_updated_data(
                         {**(coordinator.data or {}), **entry_data["klog_data"]}
                     )
 
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
-        except asyncio.TimeoutError:
-            _LOGGER.debug("Klog connection timeout, retrying...")
         except asyncio.CancelledError:
-            _LOGGER.info("Klog listener cancelled")
+            _LOGGER.info("Klog listener task cancelled")
             raise
         except Exception as err:
-            _LOGGER.warning("Klog listener error: %s, retrying in 30s", err)
+            _LOGGER.warning("Klog connection error for %s:%d: %s", host, port, err)
 
-        await asyncio.sleep(30)
+        entry_data = hass.data[DOMAIN].get(entry_id)
+        if entry_data:
+            entry_data["klog_state_machine"].klog_connected = False
+            entry_data["klog_data"]["klog_connected"] = False
+            coordinator.async_set_updated_data(
+                {**(coordinator.data or {}), **entry_data["klog_data"]}
+            )
+
+        _LOGGER.info("Reconnecting to klog in 10s...")
+        await asyncio.sleep(10)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
