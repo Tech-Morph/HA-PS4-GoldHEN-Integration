@@ -723,7 +723,7 @@ class PS4GameCoverView(HomeAssistantView):
     """Proxy PS4 game cover images from FTP to the HA dashboard."""
     url = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
     name = "api:ps4_goldhen:cover"
-    requires_auth = True
+    requires_auth = False  # ← FIXED: browser fetches img src without HA token
 
     async def get(
         self, request: web.Request, entry_id: str, title_id: str
@@ -736,7 +736,6 @@ class PS4GameCoverView(HomeAssistantView):
 
         tid = title_id.strip().upper()
 
-        # Prefer the cover path stored in game_map, fall back to standard PS4 path
         game_info = data.get("game_map", {}).get(tid, {})
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
 
