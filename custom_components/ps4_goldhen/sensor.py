@@ -134,7 +134,6 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         return {
             SENSOR_TITLE_ID:    tid,
             SENSOR_GAME_NAME:   data.get(SENSOR_GAME_NAME),
-            SENSOR_GAME_COVER:  data.get(SENSOR_GAME_COVER),
             "cdn_cover":        game_info.get("cdn_cover"),
             "cover_url": (
                 f"/api/ps4_goldhen/cover/{self._entry_id}/{tid}" if tid else None
