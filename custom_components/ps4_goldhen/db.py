@@ -56,20 +56,19 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
         conn.row_factory = sqlite3.Row
 
         try:
-            # Log every table in the DB for debugging
             all_tables = [
                 r[0] for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
                 ).fetchall()
             ]
-            _LOGGER.warning("app.db tables: %s", all_tables)
+            _LOGGER.debug("app.db tables: %s", all_tables)
 
             tables = _list_appbrowse_tables(conn)
-            _LOGGER.warning("app.db appbrowse tables found: %s", tables)
+            _LOGGER.debug("app.db appbrowse tables found: %s", tables)
 
             for table in tables:
                 cols = _table_columns(conn, table)
-                _LOGGER.warning("Table %s columns: %s", table, list(cols.keys()))
+                _LOGGER.debug("Table %s columns: %s", table, list(cols.keys()))
 
                 if "titleid" not in cols or "titlename" not in cols:
                     _LOGGER.warning(
@@ -77,15 +76,14 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                     )
                     continue
 
-                tid_col   = cols["titleid"]
-                name_col  = cols["titlename"]
+                tid_col  = cols["titleid"]
+                name_col = cols["titlename"]
 
-                # Cover: try thumbnailurl first, then metadatapath
                 cover_col = (
                     cols.get("thumbnailurl")
                     or cols.get("metadatapath")
                 )
-                vis_col   = cols.get("visible")
+                vis_col = cols.get("visible")
 
                 select_cols = f'"{tid_col}", "{name_col}"'
                 if cover_col:
@@ -94,7 +92,7 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                 where = f'WHERE "{vis_col}" = 1' if vis_col else ""
                 query = f'SELECT {select_cols} FROM "{table}" {where}'
 
-                _LOGGER.warning("Executing: %s", query)
+                _LOGGER.debug("Executing: %s", query)
 
                 try:
                     rows = conn.execute(query).fetchall()
@@ -102,7 +100,7 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                     _LOGGER.warning("Query failed on %s: %s", table, err)
                     continue
 
-                _LOGGER.warning("Table %s returned %d rows", table, len(rows))
+                _LOGGER.debug("Table %s returned %d rows", table, len(rows))
 
                 for row in rows:
                     tid   = str(row[0]).strip().upper() if row[0] else None
@@ -123,7 +121,7 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
             with contextlib.suppress(Exception):
                 os.unlink(tmp_path)
 
-    _LOGGER.warning("app.db total resolved: %d titles", len(game_map))
+    _LOGGER.info("app.db total resolved: %d titles", len(game_map))
     return game_map
 
 
@@ -132,7 +130,7 @@ def download_and_parse(host: str, port: int) -> dict[str, dict[str, Any]]:
     Blocking — FTP-download app.db from the PS4 and return the game map.
     Call via hass.async_add_executor_job().
     """
-    _LOGGER.warning("Attempting app.db download from %s:%d", host, port)
+    _LOGGER.debug("Attempting app.db download from %s:%d", host, port)
     buffer = io.BytesIO()
 
     with ftplib.FTP() as ftp:
@@ -146,12 +144,13 @@ def download_and_parse(host: str, port: int) -> dict[str, dict[str, Any]]:
                 ftp.retrbinary(f"RETR {candidate}", buffer.write)
                 db_bytes = buffer.getvalue()
                 if db_bytes:
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "Downloaded %s from PS4 (%d bytes)", candidate, len(db_bytes)
                     )
                     return _extract_game_map(db_bytes)
             except ftplib.error_perm as err:
-                _LOGGER.warning("FTP RETR %s failed: %s", candidate, err)
+                _LOGGER.debug("FTP RETR %s failed: %s", candidate, err)
                 continue
 
     raise FileNotFoundError("Could not download app.db from PS4 FTP")
+
