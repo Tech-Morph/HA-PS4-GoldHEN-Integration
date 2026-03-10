@@ -42,7 +42,13 @@ from .const import (
     TCP_PROBE_TIMEOUT,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
-    SENSOR_RSX_TEMP,
+    SENSOR_TITLE_ID,
+    SENSOR_GAME_NAME,
+    SENSOR_GAME_COVER,
+    HOME_SCREEN,
+    APP_DB_REMOTE,
+    APP_DB_LOCAL,
+    DB_REFRESH_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,40 +68,34 @@ _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
 
-_HOME_SCREEN_STATE = "PlayStation Home Screen"
+_HOME_SCREEN_STATE = HOME_SCREEN
 _IDLE_STATE = "Idle"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
 
 # ── Primary signals ────────────────────────────────────────────────────────────
-# "[SL] AppFocusChanged [OLD] -> [NEW]"  (the [SL] logger is ground truth)
 _KLOG_SL_FOCUS_PATTERN = re.compile(
     r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
     re.IGNORECASE,
 )
 
-# launchApp from SceLncService — fires before focus, good early signal
 _KLOG_LNC_LAUNCH_PATTERN = re.compile(
     r"\[SceLncService\]\s+launchApp\(([A-Z]{4}\d{5})\)",
     re.IGNORECASE,
 )
 
-# Game fully started (BGFT fires after binary is loaded)
 _KLOG_BGFT_GAME_START = re.compile(
     r"\[BGFT\].*GameWillStart\(([A-Z]{4}\d{5}),",
     re.IGNORECASE,
 )
 
-# Game closed — fires when user quits the app
 _KLOG_GAME_CLOSE_PATTERN = re.compile(r"Game Close detected", re.IGNORECASE)
 _KLOG_BGFT_GAME_STOPPED = re.compile(
     r"\[BGFT\].*GameStopped\(([A-Z]{4}\d{5}),",
     re.IGNORECASE,
 )
 
-# Back to home after app exit:
-# "[SceShellUI] OnFocusActiveSceneChanged [ApplicationExitScene : ApplicationExitScene] -> [ContentAreaScene : ContentAreaScene]"
 _KLOG_EXIT_TO_HOME_PATTERN = re.compile(
     r"OnFocusActiveSceneChanged\s+\[ApplicationExitScene\s*:\s*ApplicationExitScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
     re.IGNORECASE,
@@ -115,7 +115,6 @@ _KLOG_NOISE_PATTERNS = (
 )
 
 _KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
-_KLOG_RSX_TEMP_PATTERN = re.compile(r"(?:RSX|GPU).*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
@@ -256,20 +255,18 @@ class KlogStateMachine:
     """
 
     def __init__(self) -> None:
-        self.current_title_id: str | None = None   # None = home screen
+        self.current_title_id: str | None = None
         self.last_reason = "init"
         self.last_signal_line = ""
         self.recent_lines: deque[str] = deque(maxlen=250)
         self.klog_connected: bool = True
-
-        # Pending launch: we saw launchApp but not yet [SL] AppFocusChanged
         self._pending_launch: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         state = self.current_title_id if self.current_title_id else _HOME_SCREEN_STATE
         return {
             SENSOR_CURRENT_GAME: state,
-            "title_id": self.current_title_id,
+            SENSOR_TITLE_ID: self.current_title_id,
             "state_reason": self.last_reason,
             "state_signal_line": self.last_signal_line,
             "pending_title_id": self._pending_launch,
@@ -281,7 +278,6 @@ class KlogStateMachine:
         self.recent_lines.append(line[-300:])
         self.klog_connected = True
 
-        # Fast-path: skip noise
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line):
                 return False
@@ -311,7 +307,6 @@ class KlogStateMachine:
             tid = m.group(1).strip().upper()
             if _is_real_game_title_id(tid):
                 self._pending_launch = tid
-                # Don't commit yet — wait for [SL] AppFocusChanged or GameWillStart
                 self.last_reason = "lnc_launch_pending"
                 self.last_signal_line = line[-300:]
                 return False
@@ -355,11 +350,6 @@ def _parse_klog_line(line: str, entry_data: dict[str, Any]) -> bool:
     if m:
         with contextlib.suppress(ValueError):
             klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
-
-    m = _KLOG_RSX_TEMP_PATTERN.search(line)
-    if m:
-        with contextlib.suppress(ValueError):
-            klog_data[SENSOR_RSX_TEMP] = float(m.group(1))
 
     return state_changed
 
@@ -524,7 +514,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_data": {
             **state_machine.snapshot(),
             SENSOR_CPU_TEMP: None,
-            SENSOR_RSX_TEMP: None,
+            SENSOR_GAME_NAME: None,
+            SENSOR_GAME_COVER: None,
         },
     }
 
