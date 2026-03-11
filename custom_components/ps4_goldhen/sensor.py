@@ -1,9 +1,9 @@
 """PS4 GoldHEN sensors."""
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import UnitOfTemperature, UnitOfPower
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -14,10 +14,15 @@ from .const import (
     CONF_PS4_HOST,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
+    SENSOR_SOC_TEMP,
     SENSOR_TITLE_ID,
     SENSOR_GAME_NAME,
     SENSOR_GAME_COVER,
     SENSOR_KLOG_LAST_LINE,
+    SENSOR_SOC_POWER,
+    SENSOR_CPU_POWER,
+    SENSOR_GPU_POWER,
+    SENSOR_TOTAL_POWER,
     HOME_SCREEN,
 )
 
@@ -40,6 +45,11 @@ async def async_setup_entry(
             PS4FTPStatusSensor(coordinator, entry),
             PS4CurrentGameSensor(coordinator, entry),
             PS4CPUTempSensor(coordinator, entry),
+            PS4SoCTempSensor(coordinator, entry),
+            PS4SoCPowerSensor(coordinator, entry),
+            PS4CPUPowerSensor(coordinator, entry),
+            PS4GPUPowerSensor(coordinator, entry),
+            PS4TotalPowerSensor(coordinator, entry),
             PS4KlogLastLineSensor(coordinator, entry),
         ],
         update_before_add=False,
@@ -113,7 +123,6 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def entity_picture(self) -> str | None:
-        """HA uses this to show cover art automatically in entity/logbook cards."""
         data = self.coordinator.data or {}
         tid  = data.get(SENSOR_TITLE_ID)
         if not tid:
@@ -125,14 +134,12 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
         data     = self.coordinator.data or {}
         val      = self.native_value
         tid      = data.get(SENSOR_TITLE_ID)
-
         game_map  = (
             self.hass.data.get(DOMAIN, {})
             .get(self._entry_id, {})
             .get("game_map", {})
         )
         game_info = game_map.get(tid, {}) if tid else {}
-
         return {
             SENSOR_TITLE_ID:    tid,
             SENSOR_GAME_NAME:   data.get(SENSOR_GAME_NAME),
@@ -159,6 +166,7 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
     _attr_name = "CPU Temperature"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:thermometer"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
@@ -172,8 +180,94 @@ class PS4CPUTempSensor(CoordinatorEntity, SensorEntity):
         return float(temp) if temp is not None else None
 
 
+class PS4SoCTempSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "SoC Temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_soc_temp"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        temp = data.get(SENSOR_SOC_TEMP)
+        return float(temp) if temp is not None else None
+
+
+class PS4SoCPowerSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "SoC Power"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_soc_power"
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get(SENSOR_SOC_POWER)
+
+
+class PS4CPUPowerSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "CPU Power"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cpu-64-bit"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_cpu_power"
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get(SENSOR_CPU_POWER)
+
+
+class PS4GPUPowerSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "GPU Power"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:gpu"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_gpu_power"
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get(SENSOR_GPU_POWER)
+
+
+class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Total Power"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:flash"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_total_power"
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get(SENSOR_TOTAL_POWER)
+
+
 class PS4KlogLastLineSensor(CoordinatorEntity, SensorEntity):
-    """Surfaces the last non-noise klog line received from the PS4."""
     _attr_has_entity_name = True
     _attr_name = "Klog Last Line"
     _attr_icon = "mdi:console-line"
@@ -186,5 +280,4 @@ class PS4KlogLastLineSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> str | None:
         data = self.coordinator.data or {}
         line = data.get(SENSOR_KLOG_LAST_LINE)
-        # HA state max length is 255 chars
         return line[:255] if line else None

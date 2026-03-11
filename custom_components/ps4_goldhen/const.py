@@ -25,15 +25,22 @@ TCP_PROBE_TIMEOUT = 3.0
 # — Platforms ———————————————————————————————————————————————————————————————
 PLATFORMS: list[str] = ["sensor", "button"]
 
-# — Sensor data keys (from klog parsing) ——
-SENSOR_CURRENT_GAME  = "current_game"
-SENSOR_CPU_TEMP      = "cpu_temp"
-SENSOR_TITLE_ID      = "title_id"
-SENSOR_GAME_NAME     = "game_name"
-SENSOR_GAME_COVER    = "cover"
+# — Sensor data keys (from klog parsing) —————————————————————————————————————————
+SENSOR_CURRENT_GAME   = "current_game"
+SENSOR_CPU_TEMP       = "cpu_temp"
+SENSOR_SOC_TEMP       = "soc_temp"
+SENSOR_TITLE_ID       = "title_id"
+SENSOR_GAME_NAME      = "game_name"
+SENSOR_GAME_COVER     = "cover"
 SENSOR_KLOG_LAST_LINE = "klog_last_line"
 
-# — HA event fired for every non-noise klog line ——————————————————————————
+# — Power sensor keys (milliwatts from PRX [SysInfo] line) —————————————————
+SENSOR_SOC_POWER   = "soc_power_mw"
+SENSOR_CPU_POWER   = "cpu_power_mw"
+SENSOR_GPU_POWER   = "gpu_power_mw"
+SENSOR_TOTAL_POWER = "total_power_mw"
+
+# — HA event fired for every non-noise klog line ——————————————————————
 EVENT_KLOG_LINE = "ps4_goldhen_klog_event"
 
 HOME_SCREEN = "PlayStation Home Screen"

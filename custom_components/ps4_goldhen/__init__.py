@@ -41,10 +41,15 @@ from .const import (
     TCP_PROBE_TIMEOUT,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
+    SENSOR_SOC_TEMP,
     SENSOR_TITLE_ID,
     SENSOR_GAME_NAME,
     SENSOR_GAME_COVER,
     SENSOR_KLOG_LAST_LINE,
+    SENSOR_SOC_POWER,
+    SENSOR_CPU_POWER,
+    SENSOR_GPU_POWER,
+    SENSOR_TOTAL_POWER,
     EVENT_KLOG_LINE,
     HOME_SCREEN,
     APP_DB_REMOTE,
@@ -99,6 +104,14 @@ _KLOG_EXIT_TO_HOME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── PRX SysInfo line ───────────────────────────────────────────────────────────────
+# Format: [SysInfo] [6] CPU:59C SoC:56C | SoC:12329mW CPU:1156mW GPU:10666mW Tot:19796mW
+_KLOG_SYSINFO_PATTERN = re.compile(
+    r"\[SysInfo\].*CPU:(\d+)C\s+SoC:(\d+)C"
+    r".*?SoC:(\d+)mW\s+CPU:(\d+)mW\s+GPU:(\d+)mW\s+Tot:(\d+)mW",
+    re.IGNORECASE,
+)
+
 # ── Noise filter ───────────────────────────────────────────────────────────────
 _KLOG_NOISE_PATTERNS = (
     re.compile(r"\bD88391\b", re.IGNORECASE),
@@ -111,8 +124,6 @@ _KLOG_NOISE_PATTERNS = (
     re.compile(r"^\s*======== limit\s*=", re.IGNORECASE),
     re.compile(r"uhub\d+: giving up port", re.IGNORECASE),
 )
-
-_KLOG_CPU_TEMP_PATTERN = re.compile(r"CPU.*?(\d+\.?\d*)\s*[°C]", re.IGNORECASE)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -346,7 +357,6 @@ def _parse_klog_line(
 ) -> bool:
     state_machine: KlogStateMachine = entry_data["klog_state_machine"]
 
-    # noise-filter before any processing
     for pattern in _KLOG_NOISE_PATTERNS:
         if pattern.search(line):
             return False
@@ -366,18 +376,23 @@ def _parse_klog_line(
         klog_data[SENSOR_GAME_NAME] = None
         klog_data[SENSOR_GAME_COVER] = None
 
-    m = _KLOG_CPU_TEMP_PATTERN.search(line)
+    # ── PRX [SysInfo] temps + power ───────────────────────────────────────
+    m = _KLOG_SYSINFO_PATTERN.search(line)
     if m:
         with contextlib.suppress(ValueError):
-            klog_data[SENSOR_CPU_TEMP] = float(m.group(1))
+            klog_data[SENSOR_CPU_TEMP]    = float(m.group(1))
+            klog_data[SENSOR_SOC_TEMP]    = float(m.group(2))
+            klog_data[SENSOR_SOC_POWER]   = int(m.group(3))
+            klog_data[SENSOR_CPU_POWER]   = int(m.group(4))
+            klog_data[SENSOR_GPU_POWER]   = int(m.group(5))
+            klog_data[SENSOR_TOTAL_POWER] = int(m.group(6))
 
-    # ── Fire HA event for every non-noise klog line ────────────────────────
     hass.bus.async_fire(
         EVENT_KLOG_LINE,
         {
-            "entry_id":  entry_id,
-            "message":   line[:300],
-            "title_id":  klog_data.get(SENSOR_TITLE_ID),
+            "entry_id": entry_id,
+            "message":  line[:300],
+            "title_id": klog_data.get(SENSOR_TITLE_ID),
         },
     )
 
@@ -550,11 +565,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
     async def _poll_ftp() -> dict[str, Any]:
-        """
-        Periodic FTP reachability probe.
-        IMPORTANT: we merge into existing coordinator data so we never wipe
-        klog state (current game, title_id, etc.) that the klog listener wrote.
-        """
         try:
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
@@ -564,8 +574,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             reachable = True
         except Exception:
             reachable = False
-
-        # Pull the current klog state and merge ftp_reachable into it
         entry_data = _ensure_domain_root(hass).get(entry.entry_id, {})
         existing   = dict(entry_data.get("klog_data", {}))
         existing["ftp_reachable"] = reachable
@@ -604,9 +612,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_data": {
             **state_machine.snapshot(),
             SENSOR_CPU_TEMP:        None,
+            SENSOR_SOC_TEMP:        None,
             SENSOR_GAME_NAME:       None,
             SENSOR_GAME_COVER:      None,
             SENSOR_KLOG_LAST_LINE:  None,
+            SENSOR_SOC_POWER:       None,
+            SENSOR_CPU_POWER:       None,
+            SENSOR_GPU_POWER:       None,
+            SENSOR_TOTAL_POWER:     None,
             "ftp_reachable":        False,
         },
         "game_map": {},
@@ -690,17 +703,13 @@ class PS4FTPDownloadView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         import ftplib
-
         entry_id = request.query.get("entry_id")
         path     = request.query.get("path")
-
         if not entry_id or not path:
             return web.Response(text="Missing entry_id or path", status=400)
-
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-
         def _get_file():
             buf = io.BytesIO()
             with ftplib.FTP() as ftp:
@@ -708,16 +717,12 @@ class PS4FTPDownloadView(HomeAssistantView):
                 ftp.login()
                 ftp.retrbinary(f"RETR {path}", buf.write)
             return buf.getvalue()
-
         try:
             content = await request.app["hass"].async_add_executor_job(_get_file)
             return web.Response(
                 body=content,
                 content_type="application/octet-stream",
-                headers={
-                    "Content-Disposition":
-                        f'attachment; filename="{os.path.basename(path)}"'
-                },
+                headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
             )
         except Exception as err:
             return web.Response(text=f"FTP Error: {err}", status=500)
@@ -730,10 +735,8 @@ class PS4FTPUploadView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         import ftplib
-
         reader = await request.multipart()
         entry_id = path = file_field = None
-
         while True:
             part = await reader.next()
             if part is None:
@@ -745,61 +748,40 @@ class PS4FTPUploadView(HomeAssistantView):
             elif part.name == "file":
                 file_field = part
                 break
-
         if not all([entry_id, path, file_field]):
             return web.Response(text="Missing data", status=400)
-
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-
         full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
-
         def _upload(content):
             with ftplib.FTP() as ftp:
                 ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
                 ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
-
         try:
-            await request.app["hass"].async_add_executor_job(
-                _upload, await file_field.read(decode=True)
-            )
+            await request.app["hass"].async_add_executor_job(_upload, await file_field.read(decode=True))
             return web.json_response({"success": True, "path": full_dest})
         except Exception as err:
             return web.Response(text=f"FTP Upload Error: {err}", status=500)
 
 
 class PS4GameCoverView(HomeAssistantView):
-    """
-    Proxy PS4 game cover images to the HA dashboard.
-
-    Strategy (in order):
-      1. If the game_map has a Sony CDN URL → 302 redirect directly to it.
-      2. Otherwise → FTP-fetch /user/appmeta/<TITLEID>/icon0.png from the PS4.
-    """
     url = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
     name = "api:ps4_goldhen:cover"
     requires_auth = False
 
-    async def get(
-        self, request: web.Request, entry_id: str, title_id: str
-    ) -> web.Response:
+    async def get(self, request: web.Request, entry_id: str, title_id: str) -> web.Response:
         import ftplib
-
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-
         tid = title_id.strip().upper()
         game_info = data.get("game_map", {}).get(tid, {})
-
         cdn_url = game_info.get("cdn_cover")
         if cdn_url and cdn_url.startswith("http"):
             raise web.HTTPFound(cdn_url)
-
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
-
         def _fetch_cover():
             buf = io.BytesIO()
             with ftplib.FTP() as ftp:
@@ -807,14 +789,9 @@ class PS4GameCoverView(HomeAssistantView):
                 ftp.login()
                 ftp.retrbinary(f"RETR {cover_path}", buf.write)
             return buf.getvalue()
-
         try:
             img_bytes = await request.app["hass"].async_add_executor_job(_fetch_cover)
-            return web.Response(
-                body=img_bytes,
-                content_type="image/png",
-                headers={"Cache-Control": "max-age=86400"},
-            )
+            return web.Response(body=img_bytes, content_type="image/png", headers={"Cache-Control": "max-age=86400"})
         except Exception as err:
             _LOGGER.debug("Cover FTP fetch failed for %s: %s", tid, err)
             return web.Response(text=f"Cover not found: {err}", status=404)
@@ -835,10 +812,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 t.cancel()
                 with contextlib.suppress(Exception):
                     await asyncio.gather(t, return_exceptions=True)
-
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
     if unload_ok:
         _ensure_domain_root(hass).pop(entry.entry_id, None)
-
     return unload_ok
