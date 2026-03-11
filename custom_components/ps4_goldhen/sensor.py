@@ -203,7 +203,7 @@ class PS4SoCPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "SoC Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:chip"
 
@@ -220,7 +220,7 @@ class PS4CPUPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "CPU Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:cpu-64-bit"
 
@@ -237,7 +237,7 @@ class PS4GPUPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "GPU Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:gpu"
 
@@ -254,7 +254,7 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "Total Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLI_WATT
+    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:flash"
 
