@@ -18,7 +18,6 @@ from .const import (
     SENSOR_TITLE_ID,
     SENSOR_GAME_NAME,
     SENSOR_GAME_COVER,
-    SENSOR_KLOG_LAST_LINE,
     SENSOR_SOC_POWER,
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
@@ -50,7 +49,6 @@ async def async_setup_entry(
             PS4CPUPowerSensor(coordinator, entry),
             PS4GPUPowerSensor(coordinator, entry),
             PS4TotalPowerSensor(coordinator, entry),
-            PS4KlogLastLineSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -265,19 +263,3 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         return (self.coordinator.data or {}).get(SENSOR_TOTAL_POWER)
-
-
-class PS4KlogLastLineSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "Klog Last Line"
-    _attr_icon = "mdi:console-line"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_klog_last_line"
-
-    @property
-    def native_value(self) -> str | None:
-        data = self.coordinator.data or {}
-        line = data.get(SENSOR_KLOG_LAST_LINE)
-        return line[:255] if line else None
