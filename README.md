@@ -19,7 +19,34 @@ A fully local Home Assistant integration and sidebar panel for managing a **PS4 
 |---|---|
 | **Current Game** | Resolved game title from the PS4's `app.db` (e.g. `God of War`) — falls back to Title ID if DB hasn't loaded yet. State reflects `Rest Mode`, `Off`, or `PlayStation Home Screen` automatically. |
 | **FTP Status** | `online` / `offline` based on a TCP probe to the PS4 FTP port every 30 seconds. |
-| **CPU Temperature** **(WIP)** | Real-time CPU temp parsed from the GoldHEN klog stream (°C). |
+| **CPU Temperature** | Real-time CPU temp parsed from the GoldHEN klog stream (°C). Requires the SysInfo PRX plugin — see below. |
+| **SoC Temperature** | Real-time SoC temp parsed from the GoldHEN klog stream (°C). Requires the SysInfo PRX plugin — see below. |
+| **SoC Power** | SoC power draw in milliwatts, parsed from the SysInfo PRX klog line. |
+| **CPU Power** | CPU power draw in milliwatts, parsed from the SysInfo PRX klog line. |
+| **GPU Power** | GPU power draw in milliwatts, parsed from the SysInfo PRX klog line. |
+| **Total Power** | Total system power draw in milliwatts, parsed from the SysInfo PRX klog line. |
+
+> **Note:** Temperature and power sensors will show `unknown` until a `[SysInfo]` line is received over klog. They only populate while an application is running.
+
+#### SysInfo PRX Setup
+
+To enable temperature and power sensors, install the SysInfo PRX as a GoldHEN plugin:
+
+1. Copy `SysInfo.prx` to `/data/GoldHEN/plugins/` on your PS4 (via FTP).
+2. Create or edit `/data/GoldHEN/plugins/plugin.ini` to include:
+
+```ini
+[default]
+/data/GoldHEN/plugins/SysInfo.prx
+```
+
+3. Reboot the PS4 and launch any application — the PRX runs per-app and outputs lines to klog in the format:
+
+```
+[SysInfo] [6] CPU:59C SoC:56C | SoC:12329mW CPU:1156mW GPU:10666mW Tot:19796mW
+```
+
+Once received, all six sensors will populate automatically.
 
 **Current Game** extra attributes:
 
@@ -92,7 +119,7 @@ data:
   - BinLoader (default port `9090`)
   - Klog / Debug Log Server (default port `3232`)
 - *(Optional)* A Raspberry Pi or other device running a REST sensor at `sensor.ps4_state_pi` reporting `on` / `rest` / `offline` for accurate power state detection — see [PS4 State Monitor](https://github.com/Tech-Morph/PS4-State-Monitor)
-
+- *(Optional)* `SysInfo.prx` GoldHEN plugin for temperature and power sensors — see [SysInfo PRX Setup](#sysinfo-prx-setup)
 
 ---
 
@@ -184,6 +211,11 @@ If the PS4 is offline at startup, the map stays empty and the sensor falls back 
 ### Current Game shows Title ID instead of game name
 - The PS4 may have been offline when HA started — wait for the next hourly refresh, or restart HA with the PS4 on.
 - Check HA logs for `app.db` — you will see table names and row counts logged at startup.
+
+### Temperature / power sensors show `unknown`
+- These sensors require `SysInfo.prx` to be installed as a GoldHEN plugin — see [SysInfo PRX Setup](#sysinfo-prx-setup).
+- The PRX only runs while an application is active — sensors will be `unknown` on the home screen.
+- Confirm you can see `[SysInfo]` lines in the Klog Viewer panel tab while a game is running.
 
 ### FTP not working
 - Confirm GoldHEN FTP is enabled and the PS4 is reachable on the configured port.
