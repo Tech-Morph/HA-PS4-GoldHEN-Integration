@@ -4,6 +4,7 @@
 ![version](https://img.shields.io/badge/version-0.9.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
 ![license](https://img.shields.io/github/license/Tech-Morph/HA-PS4-GoldHEN-Integration)
+[![Ko-fi](https://img.shields.io/badge/Support%20Me-Ko--fi-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/techmorph)
 
 A fully local Home Assistant integration and sidebar panel for managing a **PS4 running GoldHEN** network services — no cloud, no polling services, no extra dependencies.
 
@@ -238,6 +239,14 @@ PRs are welcome. Please:
 - Ensure all async tasks and subscriptions clean up on unload.
 - Prefer `async` I/O — avoid blocking calls on the event loop.
 - Test with at least one real or mocked PS4 FTP/klog endpoint.
+
+---
+
+## 💛 Support
+
+If this integration saves you time or brings value to your setup, consider supporting development:
+
+[![Ko-fi](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/techmorph)
 
 ---
 
