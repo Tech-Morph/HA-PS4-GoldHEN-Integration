@@ -460,7 +460,11 @@ async def _klog_listener_task(
             _LOGGER.info("Klog listener task cancelled")
             raise
         except Exception as err:
-            _LOGGER.warning("Klog connection error for %s:%d: %s", host, port, err)
+            err_str = str(err)
+            if "111" in err_str or "Connect call failed" in err_str:
+                _LOGGER.debug("Klog unavailable (PS4 off/rest) %s:%d: %s", host, port, err)
+            else:
+                _LOGGER.warning("Klog connection error for %s:%d: %s", host, port, err)
 
         entry_data = hass.data[DOMAIN].get(entry_id)
         if entry_data:
