@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import os
 import re
@@ -50,6 +51,9 @@ from .const import (
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
     SENSOR_TOTAL_POWER,
+    SENSOR_FW_VERSION,
+    SENSOR_FW_STRING,
+    SENSOR_HW_MODEL,
     EVENT_KLOG_LINE,
     HOME_SCREEN,
     APP_DB_REMOTE,
@@ -578,9 +582,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             reachable = True
         except Exception:
             reachable = False
+
         entry_data = _ensure_domain_root(hass).get(entry.entry_id, {})
         existing   = dict(entry_data.get("klog_data", {}))
         existing["ftp_reachable"] = reachable
+
+        if not reachable:
+            return existing
+
+        def _fetch_state() -> dict[str, Any] | None:
+            try:
+                import ftplib
+                with ftplib.FTP() as ftp:
+                    ftp.connect(host, int(ftp_port), timeout=10)
+                    ftp.login()
+                    buf = io.BytesIO()
+                    ftp.retrbinary("RETR /user/temp/ps4_state.json", buf.write)
+                buf.seek(0)
+                return json.loads(buf.getvalue().decode("utf-8", errors="ignore"))
+            except Exception:
+                return None
+
+        state = await hass.async_add_executor_job(_fetch_state)
+        if not isinstance(state, dict):
+            return existing
+
+        fw_version = state.get("fw_version")
+        fw_string  = state.get("fw_string")
+        hw_model   = state.get("hw_model")
+        cpu_temp_c = state.get("cpu_temp_c")
+
+        if fw_version is not None:
+            existing[SENSOR_FW_VERSION] = fw_version
+        if fw_string:
+            existing[SENSOR_FW_STRING] = str(fw_string)
+        if hw_model:
+            existing[SENSOR_HW_MODEL] = str(hw_model).strip()
+
+        if cpu_temp_c is not None and existing.get(SENSOR_CPU_TEMP) is None:
+            try:
+                existing[SENSOR_CPU_TEMP] = float(cpu_temp_c)
+            except (TypeError, ValueError):
+                pass
+
         return existing
 
     coordinator = DataUpdateCoordinator(
@@ -624,6 +668,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SENSOR_CPU_POWER:       None,
             SENSOR_GPU_POWER:       None,
             SENSOR_TOTAL_POWER:     None,
+            SENSOR_FW_VERSION:      None,
+            SENSOR_FW_STRING:       None,
+            SENSOR_HW_MODEL:        None,
             "ftp_reachable":        False,
         },
         "game_map": {},
