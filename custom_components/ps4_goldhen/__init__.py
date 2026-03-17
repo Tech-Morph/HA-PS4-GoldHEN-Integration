@@ -167,18 +167,6 @@ def _copy_bundled_payloads_to_config() -> int:
     return copied
 
 
-def _list_payloads_blocking(payload_dir: str) -> list[str]:
-    p = Path(payload_dir)
-    p.mkdir(parents=True, exist_ok=True)
-    hidden = {"linux.bin"}
-    return [
-        e.name for e in sorted(p.iterdir(), key=lambda e: e.name)
-        if e.is_file()
-        and e.name.lower() not in hidden
-        and e.suffix.lower() in (".bin", ".elf")
-    ]
-
-
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
     g = _global(hass)
     if not g["frontend_registered"]:
@@ -522,47 +510,6 @@ async def _db_refresh_task(
         await asyncio.sleep(DB_REFRESH_INTERVAL)
 
 
-# ── WebSocket commands ─────────────────────────────────────────────────────────
-
-@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
-@websocket_api.async_response
-async def ws_list_entries(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict,
-) -> None:
-    entries = hass.config_entries.async_entries(DOMAIN)
-    out = [
-        {
-            "entry_id": entry.entry_id,
-            "title": entry.title,
-            "ps4_host": entry.data.get(CONF_PS4_HOST),
-            "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
-            "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
-            "klog_port": entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT),
-            "rpi_port": entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT),
-        }
-        for entry in entries
-    ]
-    connection.send_result(msg["id"], {"entries": out})
-
-
-@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_payloads"})
-@websocket_api.async_response
-async def ws_list_payloads(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict,
-) -> None:
-    try:
-        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
-        connection.send_result(
-            msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR}
-        )
-    except Exception as err:
-        connection.send_error(msg["id"], "list_error", str(err))
-
-
 # ── Config entry setup ─────────────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -693,8 +640,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     g = _global(hass)
 
     if not g["ws_registered"]:
-        websocket_api.async_register_command(hass, ws_list_entries)
-        websocket_api.async_register_command(hass, ws_list_payloads)
         from .websocket import async_setup as async_setup_websocket
         async_setup_websocket(hass)
         g["ws_registered"] = True
@@ -867,3 +812,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         _ensure_domain_root(hass).pop(entry.entry_id, None)
     return unload_ok
+
