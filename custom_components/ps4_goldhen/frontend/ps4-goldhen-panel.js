@@ -46,7 +46,7 @@ class PS4GoldHENPanel extends HTMLElement {
     this._klogStatus = "";
     this._klogLines = [];
     this._klogMaxLines = 800;
-    this._klogUnsub = null; // unsubscribe fn returned by subscribeMessage
+    this._klogUnsub = null;
     this._klogManuallyDisconnected = false;
     this._klogRenderQueued = false;
 
@@ -98,7 +98,6 @@ class PS4GoldHENPanel extends HTMLElement {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
   }
 
-  // Signed paths are ideal for GET downloads; uploads should use authenticated fetch.
   async _signedPath(path) {
     const resp = await this._hass.callWS({ type: "auth/sign_path", path });
     return resp.path;
@@ -123,7 +122,6 @@ class PS4GoldHENPanel extends HTMLElement {
       const next = resp.payloads || [];
       this._payloadDir = resp.payload_dir || "";
 
-      // Only re-render if list actually changes (keeps UI smoother on auto-refresh)
       const a = JSON.stringify(this._payloads);
       const b = JSON.stringify(next);
       this._payloads = next;
@@ -300,7 +298,7 @@ class PS4GoldHENPanel extends HTMLElement {
 
   // --- Payload icons ---
   _normalizePayloadKey(name) {
-    const base = String(name || "").replace(/\.[^/.]+$/, ""); // strip extension
+    const base = String(name || "").replace(/\.[^/.]+$/, "");
     return base
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -311,7 +309,6 @@ class PS4GoldHENPanel extends HTMLElement {
   _payloadIconUrl(payloadName) {
     const key = this._normalizePayloadKey(payloadName);
 
-    // Map normalized payload key -> icon filename (you add these files)
     const map = {
       "disable-aslr": "disable-aslr.png",
       "exit-idu": "exit-idu.png",
@@ -342,11 +339,7 @@ class PS4GoldHENPanel extends HTMLElement {
     };
 
     const iconFile = map[key];
-
-    // Fallback to GoldHEN logo if we don't have an icon for the payload
     if (!iconFile) return "/api/ps4_goldhen/frontend/goldhen_logo.png";
-
-    // Add a tiny cache-bust so icon updates show quickly if you replace files
     return `${this._payloadIconBaseUrl}/${iconFile}?v=1`;
   }
 
@@ -364,7 +357,6 @@ class PS4GoldHENPanel extends HTMLElement {
       return;
     }
 
-    // Prefer live input values, fall back to stored state, then entry defaults
     const host =
       (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() ||
       this._binHost ||
@@ -381,7 +373,6 @@ class PS4GoldHENPanel extends HTMLElement {
       (this.shadowRoot.querySelector("#bin-timeout")?.value || "").trim() || this._binTimeout || "30"
     );
 
-    // Persist what user typed (so it doesn't reset on re-render)
     this._binHost = host;
     this._binPort = String(port || "");
     this._binTimeout = String(timeout || "");
@@ -407,15 +398,18 @@ class PS4GoldHENPanel extends HTMLElement {
   }
 
   // --- Klog helpers ---
+
+  // Handles both the new { message, title_id } shape from subscribe_klog
+  // and the legacy { event: { line/message } } shape, so nothing breaks
+  // if the old klog_subscribe command is still present on the backend.
   _extractKlogLine(m) {
-    const a = m?.event?.line;
-    if (typeof a === "string") return a;
+    // New shape from ps4_goldhen/subscribe_klog
+    if (typeof m?.message === "string") return m.message;
 
-    const b = m?.line;
-    if (typeof b === "string") return b;
-
-    const c = m?.event?.message;
-    if (typeof c === "string") return c;
+    // Legacy fallbacks
+    if (typeof m?.event?.line === "string") return m.event.line;
+    if (typeof m?.line === "string") return m.line;
+    if (typeof m?.event?.message === "string") return m.event.message;
 
     return null;
   }
@@ -434,7 +428,7 @@ class PS4GoldHENPanel extends HTMLElement {
     });
   }
 
-  // Klog
+  // Klog connect — loads history first, then subscribes for live lines
   async _klogConnect() {
     if (!this._hass || !this._selectedEntryId) {
       alert("Select a PS4 first.");
@@ -443,19 +437,37 @@ class PS4GoldHENPanel extends HTMLElement {
 
     if (this._klogUnsub) return;
 
-    const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || this._klogPort || "3232").trim();
-    const port = parseInt(portStr, 10) || 3232;
-    this._klogPort = String(port);
-
     if (!this._hass.connection || typeof this._hass.connection.subscribeMessage !== "function") {
-      this._klogStatus = "Klog subscribeMessage not available in this HA frontend context.";
+      this._klogStatus = "subscribeMessage not available in this HA frontend context.";
       this._render();
       return;
     }
 
-    this._klogStatus = `Connecting (port ${port})...`;
+    this._klogStatus = "Loading history...";
     this._render();
 
+    // Step 1: pre-fill with buffered history (up to 250 lines already in the deque)
+    try {
+      const hist = await this._hass.callWS({
+        type: "ps4_goldhen/get_klog_history",
+        entry_id: this._selectedEntryId,
+        limit: 250,
+      });
+      if (Array.isArray(hist.lines) && hist.lines.length) {
+        this._klogLines = hist.lines.slice(-this._klogMaxLines);
+      }
+      const connectedOnBackend = hist.klog_connected ?? true;
+      this._klogStatus = connectedOnBackend
+        ? `History loaded (${this._klogLines.length} lines). Subscribing...`
+        : `History loaded (PS4 klog offline — waiting for reconnect)`;
+      this._render();
+    } catch (e) {
+      // Non-fatal — history just won't pre-fill
+      this._klogStatus = `History unavailable (${e.message || e}). Subscribing anyway...`;
+      this._render();
+    }
+
+    // Step 2: subscribe for live lines via the event-bus-backed WS command
     try {
       this._klogUnsub = await this._hass.connection.subscribeMessage(
         (m) => {
@@ -470,16 +482,15 @@ class PS4GoldHENPanel extends HTMLElement {
           this._scheduleKlogRender();
         },
         {
-          type: "ps4_goldhen/klog_subscribe",
+          type: "ps4_goldhen/subscribe_klog",
           entry_id: this._selectedEntryId,
-          port: port,
         }
       );
 
       this._klogManuallyDisconnected = false;
-      this._klogStatus = `Connected (port ${port}).`;
+      this._klogStatus = `Live — ${this._klogLines.length} lines`;
     } catch (e) {
-      this._klogStatus = `Connect failed: ${e.message || e}`;
+      this._klogStatus = `Subscribe failed: ${e.message || e}`;
       this._klogUnsub = null;
     }
 
@@ -488,9 +499,7 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _klogDisconnect(markManual = true) {
     if (this._klogUnsub) {
-      try {
-        this._klogUnsub();
-      } catch (_) {}
+      try { this._klogUnsub(); } catch (_) {}
     }
     this._klogUnsub = null;
 
@@ -544,7 +553,11 @@ class PS4GoldHENPanel extends HTMLElement {
         .editor-actions button { padding:8px 20px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); cursor:pointer; }
         .btn-save { background:var(--primary-color)!important; color:#fff!important; border:none!important; }
 
-        pre.klog { margin-top:10px; height:45vh; overflow:auto; padding:10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--secondary-background-color); white-space:pre-wrap; }
+        pre.klog { margin-top:10px; height:45vh; overflow:auto; padding:10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--secondary-background-color); white-space:pre-wrap; font-size:12px; font-family:Consolas,Monaco,monospace; }
+        .klog-statusbar { display:flex; align-items:center; gap:10px; margin-top:6px; flex-wrap:wrap; }
+        .klog-dot { width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; }
+        .klog-dot.live { background:#4caf50; box-shadow:0 0 6px #4caf50; }
+        .klog-dot.off  { background:#9e9e9e; }
 
         /* Payload grid */
         .payload-toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px; }
@@ -607,7 +620,6 @@ class PS4GoldHENPanel extends HTMLElement {
 
         const entry = this._selectedEntry();
         if (entry) {
-          // Only set defaults if user hasn't typed overrides
           if (!this._binHost) this._binHost = entry.ps4_host || "";
           if (!this._binPort) this._binPort = String(entry.binloader_port ?? "");
         }
@@ -687,19 +699,21 @@ class PS4GoldHENPanel extends HTMLElement {
     }
 
     if (this._tab === "klog") {
-      const c = this.shadowRoot.querySelector("#btn-klog-connect");
-      const d = this.shadowRoot.querySelector("#btn-klog-disconnect");
+      const c   = this.shadowRoot.querySelector("#btn-klog-connect");
+      const d   = this.shadowRoot.querySelector("#btn-klog-disconnect");
       const clr = this.shadowRoot.querySelector("#btn-klog-clear");
-      if (c) c.onclick = () => this._klogConnect();
-      if (d) d.onclick = () => this._klogDisconnect(true);
+      if (c)   c.onclick   = () => this._klogConnect();
+      if (d)   d.onclick   = () => this._klogDisconnect(true);
       if (clr) clr.onclick = () => this._klogClear();
 
+      // Restore existing lines without a full re-render (avoids scroll reset)
       const box = this.shadowRoot.querySelector("#klog-box");
       if (box) {
         box.textContent = this._klogLines.join("\n");
         box.scrollTop = box.scrollHeight;
       }
 
+      // Auto-connect when entering the tab (unless user explicitly disconnected)
       if (!this._klogUnsub && !this._klogManuallyDisconnected && this._selectedEntryId) {
         setTimeout(() => this._klogConnect(), 0);
       }
@@ -707,9 +721,9 @@ class PS4GoldHENPanel extends HTMLElement {
 
     if (this._editing) {
       const cancel = this.shadowRoot.querySelector("#btn-cancel");
-      const save = this.shadowRoot.querySelector("#btn-save");
+      const save   = this.shadowRoot.querySelector("#btn-save");
       if (cancel) cancel.onclick = () => { this._editing = null; this._render(); };
-      if (save) save.onclick = () => this._saveFile();
+      if (save)   save.onclick   = () => this._saveFile();
     }
   }
 
@@ -758,8 +772,8 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _renderBinLoader() {
     const entry = this._selectedEntry();
-    const shownHost = this._binHost || entry?.ps4_host || "";
-    const shownPort = this._binPort || String(entry?.binloader_port ?? "");
+    const shownHost    = this._binHost    || entry?.ps4_host || "";
+    const shownPort    = this._binPort    || String(entry?.binloader_port ?? "");
     const shownTimeout = this._binTimeout || "30";
 
     const filter = (this._payloadFilter || "").trim().toLowerCase();
@@ -816,16 +830,20 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _renderKlog() {
     const connected = !!this._klogUnsub;
+    const lineCount = this._klogLines.length;
     return html`
       <div class="card">
         <h3>Live Klog</h3>
         <div class="row">
-          <input id="klog-port" type="number" value="${this._klogPort}" style="width:160px;">
-          <button class="btn" id="btn-klog-connect" ${connected ? "disabled" : ""}>Connect</button>
+          <button class="btn" id="btn-klog-connect"    ${connected ? "disabled" : ""}>Connect</button>
           <button class="btn" id="btn-klog-disconnect" ${connected ? "" : "disabled"}>Disconnect</button>
           <button class="btn" id="btn-klog-clear">Clear</button>
         </div>
-        <div class="muted">${this._klogStatus || "Waiting... (default port 3232)"}</div>
+        <div class="klog-statusbar">
+          <span class="klog-dot ${connected ? "live" : "off"}"></span>
+          <span class="muted">${this._klogStatus || "Waiting…"}</span>
+          ${lineCount ? `<span class="pill">${lineCount} lines</span>` : ""}
+        </div>
         <pre class="klog" id="klog-box"></pre>
       </div>
     `;
@@ -835,37 +853,34 @@ class PS4GoldHENPanel extends HTMLElement {
     const table = this.shadowRoot.querySelector("table");
     if (table) {
       table.onclick = (ev) => {
-        const btn = ev.target.closest("button");
+        const btn  = ev.target.closest("button");
         const span = ev.target.closest("span.folder");
 
-        if (span) {
-          this._loadDir(span.dataset.path);
-          return;
-        }
+        if (span) { this._loadDir(span.dataset.path); return; }
         if (!btn) return;
 
         const action = btn.dataset.action;
-        const path = btn.dataset.path;
-        const name = btn.dataset.name;
-        const isDir = btn.dataset.isdir === "true";
+        const path   = btn.dataset.path;
+        const name   = btn.dataset.name;
+        const isDir  = btn.dataset.isdir === "true";
 
-        if (action === "delete") this._deleteEntry({ name, path, is_dir: isDir });
-        else if (action === "rename") this._renameEntry({ name, path, is_dir: isDir });
-        else if (action === "edit") this._editEntry({ name, path, is_dir: isDir });
+        if (action === "delete")   this._deleteEntry({ name, path, is_dir: isDir });
+        else if (action === "rename")   this._renameEntry({ name, path, is_dir: isDir });
+        else if (action === "edit")     this._editEntry({ name, path, is_dir: isDir });
         else if (action === "download") this._downloadEntry({ name, path, is_dir: isDir });
       };
     }
 
-    const root = this.shadowRoot.querySelector("#btn-root");
-    const back = this.shadowRoot.querySelector("#btn-back");
+    const root    = this.shadowRoot.querySelector("#btn-root");
+    const back    = this.shadowRoot.querySelector("#btn-back");
     const refresh = this.shadowRoot.querySelector("#btn-refresh");
-    if (root) root.onclick = () => this._loadDir("/");
-    if (back) back.onclick = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
+    if (root)    root.onclick    = () => this._loadDir("/");
+    if (back)    back.onclick    = () => this._loadDir(this._path.split("/").slice(0, -1).join("/") || "/");
     if (refresh) refresh.onclick = () => this._loadDir();
 
-    const btnSelect = this.shadowRoot.querySelector("#btn-ftp-select");
+    const btnSelect   = this.shadowRoot.querySelector("#btn-ftp-select");
     const uploadInput = this.shadowRoot.querySelector("#ftp-upload-input");
-    const btnUpload = this.shadowRoot.querySelector("#btn-ftp-upload");
+    const btnUpload   = this.shadowRoot.querySelector("#btn-ftp-upload");
 
     if (btnSelect && uploadInput) btnSelect.onclick = () => uploadInput.click();
     if (btnUpload) btnUpload.onclick = () => this._uploadFileToFtp();
