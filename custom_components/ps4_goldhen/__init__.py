@@ -349,10 +349,8 @@ def _parse_klog_line(
 ) -> bool:
     state_machine: KlogStateMachine = entry_data["klog_state_machine"]
 
-    for pattern in _KLOG_NOISE_PATTERNS:
-        if pattern.search(line):
-            return False
-
+    # ingest() handles noise filtering internally — do NOT pre-filter here,
+    # that would skip appending to recent_lines and skip the event fire below.
     state_changed = state_machine.ingest(line)
 
     klog_data = entry_data["klog_data"]
@@ -392,6 +390,23 @@ def _parse_klog_line(
 
 
 # ── Background tasks ───────────────────────────────────────────────────────────
+
+def _merge_klog_into_coordinator(
+    coordinator_data: dict[str, Any] | None,
+    klog_data: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Merge klog_data into coordinator data without overwriting non-None
+    FTP-sourced values (fw_version, fw_string, hw_model) with None.
+    """
+    base = dict(coordinator_data) if coordinator_data else {}
+    for key, value in klog_data.items():
+        # Only overwrite with None if the base doesn't already have a real value
+        if value is None and base.get(key) is not None:
+            continue
+        base[key] = value
+    return base
+
 
 async def _klog_listener_task(
     hass: HomeAssistant,
@@ -441,7 +456,9 @@ async def _klog_listener_task(
 
                 if changed:
                     coordinator.async_set_updated_data(
-                        {**(coordinator.data or {}), **entry_data["klog_data"]}
+                        _merge_klog_into_coordinator(
+                            coordinator.data, entry_data["klog_data"]
+                        )
                     )
 
             writer.close()
@@ -462,9 +479,12 @@ async def _klog_listener_task(
         if entry_data:
             entry_data["klog_state_machine"].klog_connected = False
             entry_data["klog_data"]["klog_connected"] = False
-            coordinator.async_set_updated_data(
-                {**(coordinator.data or {}), **entry_data["klog_data"]}
-            )
+            with contextlib.suppress(Exception):
+                coordinator.async_set_updated_data(
+                    _merge_klog_into_coordinator(
+                        coordinator.data, entry_data["klog_data"]
+                    )
+                )
 
         _LOGGER.info("Reconnecting to klog in 10s...")
         await asyncio.sleep(10)
@@ -498,7 +518,7 @@ async def _db_refresh_task(
                 klog_data[SENSOR_GAME_NAME]  = game_map[tid].get("name")
                 klog_data[SENSOR_GAME_COVER] = game_map[tid].get("cover")
                 coordinator.async_set_updated_data(
-                    {**(coordinator.data or {}), **klog_data}
+                    _merge_klog_into_coordinator(coordinator.data, klog_data)
                 )
 
         except asyncio.CancelledError:
@@ -586,13 +606,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     root = _ensure_domain_root(hass)
 
+    # ── FIX: properly await old task cancellation before replacing entry data ──
     prev = root.get(entry.entry_id)
     if isinstance(prev, dict):
+        tasks_to_cancel = []
         for task_key in ("klog_task", "db_task"):
             t = prev.get(task_key)
             if t and not t.done():
-                with contextlib.suppress(Exception):
-                    t.cancel()
+                t.cancel()
+                tasks_to_cancel.append(t)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
     state_machine = KlogStateMachine()
 
