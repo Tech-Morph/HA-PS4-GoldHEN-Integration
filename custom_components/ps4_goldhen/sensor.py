@@ -129,9 +129,9 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        data     = self.coordinator.data or {}
-        val      = self.native_value
-        tid      = data.get(SENSOR_TITLE_ID)
+        data      = self.coordinator.data or {}
+        val       = self.native_value
+        tid       = data.get(SENSOR_TITLE_ID)
         game_map  = (
             self.hass.data.get(DOMAIN, {})
             .get(self._entry_id, {})
@@ -146,8 +146,8 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
                 f"/api/ps4_goldhen/cover/{self._entry_id}/{tid}" if tid else None
             ),
             "state_classification": (
-                "rest"        if val == _REST_MODE_STATE  else
-                "off"         if val == _OFF_STATE        else
+                "rest"        if val == _REST_MODE_STATE   else
+                "off"         if val == _OFF_STATE         else
                 "home_screen" if val == _HOME_SCREEN_STATE else
                 "game"
             ),
@@ -201,7 +201,7 @@ class PS4SoCPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "SoC Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:chip"
 
@@ -210,7 +210,7 @@ class PS4SoCPowerSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_soc_power"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> float | None:
         return (self.coordinator.data or {}).get(SENSOR_SOC_POWER)
 
 
@@ -218,7 +218,7 @@ class PS4CPUPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "CPU Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:cpu-64-bit"
 
@@ -227,7 +227,7 @@ class PS4CPUPowerSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_cpu_power"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> float | None:
         return (self.coordinator.data or {}).get(SENSOR_CPU_POWER)
 
 
@@ -235,7 +235,7 @@ class PS4GPUPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "GPU Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:gpu"
 
@@ -244,7 +244,7 @@ class PS4GPUPowerSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_gpu_power"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> float | None:
         return (self.coordinator.data or {}).get(SENSOR_GPU_POWER)
 
 
@@ -252,7 +252,7 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "Total Power"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_native_unit_of_measurement = UnitOfPower.MILLIWATT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:flash"
 
@@ -261,5 +261,5 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_total_power"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> float | None:
         return (self.coordinator.data or {}).get(SENSOR_TOTAL_POWER)
