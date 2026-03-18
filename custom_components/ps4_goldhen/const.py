@@ -33,9 +33,6 @@ SENSOR_TITLE_ID       = "title_id"
 SENSOR_GAME_NAME      = "game_name"
 SENSOR_GAME_COVER     = "cover"
 SENSOR_KLOG_LAST_LINE = "klog_last_line"
-SENSOR_FW_VERSION     = "fw_version"
-SENSOR_FW_STRING      = "fw_string"
-SENSOR_HW_MODEL       = "hw_model"
 
 # — Power sensor keys (milliwatts from PRX [SysInfo] line) —————————————————
 SENSOR_SOC_POWER   = "soc_power_mw"

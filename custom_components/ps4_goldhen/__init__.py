@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
-import json
 import logging
 import os
 import re
@@ -51,9 +50,6 @@ from .const import (
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
     SENSOR_TOTAL_POWER,
-    SENSOR_FW_VERSION,
-    SENSOR_FW_STRING,
-    SENSOR_HW_MODEL,
     EVENT_KLOG_LINE,
     HOME_SCREEN,
     APP_DB_REMOTE,
@@ -108,7 +104,8 @@ _KLOG_EXIT_TO_HOME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# ── PRX SysInfo line ───────────────────────────────────────────────────────────
+# ── PRX SysInfo line ───────────────────────────────────────────────────────────────
+# Format: [SysInfo] [6] CPU:59C SoC:56C | SoC:12329mW CPU:1156mW GPU:10666mW Tot:19796mW
 _KLOG_SYSINFO_PATTERN = re.compile(
     r"\[SysInfo\].*CPU:(\d+)C\s+SoC:(\d+)C"
     r".*?SoC:(\d+)mW\s+CPU:(\d+)mW\s+GPU:(\d+)mW\s+Tot:(\d+)mW",
@@ -164,6 +161,18 @@ def _copy_bundled_payloads_to_config() -> int:
         shutil.copy2(str(p), str(dst))
         copied += 1
     return copied
+
+
+def _list_payloads_blocking(payload_dir: str) -> list[str]:
+    p = Path(payload_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    hidden = {"linux.bin"}
+    return [
+        e.name for e in sorted(p.iterdir(), key=lambda e: e.name)
+        if e.is_file()
+        and e.name.lower() not in hidden
+        and e.suffix.lower() in (".bin", ".elf")
+    ]
 
 
 async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
@@ -250,26 +259,29 @@ class KlogStateMachine:
         self.last_reason = "init"
         self.last_signal_line = ""
         self.recent_lines: deque[str] = deque(maxlen=250)
-        self.klog_connected: bool = False
+        self.klog_connected: bool = True
         self._pending_launch: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         state = self.current_title_id if self.current_title_id else _HOME_SCREEN_STATE
         return {
-            SENSOR_CURRENT_GAME:  state,
-            SENSOR_TITLE_ID:      self.current_title_id,
-            "state_reason":       self.last_reason,
-            "state_signal_line":  self.last_signal_line,
-            "pending_title_id":   self._pending_launch,
-            "klog_connected":     self.klog_connected,
+            SENSOR_CURRENT_GAME: state,
+            SENSOR_TITLE_ID: self.current_title_id,
+            "state_reason": self.last_reason,
+            "state_signal_line": self.last_signal_line,
+            "pending_title_id": self._pending_launch,
+            "klog_connected": self.klog_connected,
         }
 
     def ingest(self, line: str) -> bool:
         self.recent_lines.append(line[-300:])
+        self.klog_connected = True
+
         for pattern in _KLOG_NOISE_PATTERNS:
             if pattern.search(line):
                 return False
 
+        # ── [SL] AppFocusChanged ───────────────────────────────────────────
         m = _KLOG_SL_FOCUS_PATTERN.search(line)
         if m:
             new_app = m.group(2).strip().upper()
@@ -286,6 +298,7 @@ class KlogStateMachine:
                     return self._set(None, "sl_focus_home", line)
             return False
 
+        # ── [BGFT] GameWillStart ───────────────────────────────────────────
         m = _KLOG_BGFT_GAME_START.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -293,6 +306,7 @@ class KlogStateMachine:
                 self._pending_launch = tid
                 return self._set(tid, "bgft_game_will_start", line)
 
+        # ── [SceLncService] launchApp ──────────────────────────────────────
         m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -302,16 +316,19 @@ class KlogStateMachine:
                 self.last_signal_line = line[-300:]
                 return False
 
+        # ── Game Close detected ────────────────────────────────────────────
         if _KLOG_GAME_CLOSE_PATTERN.search(line):
             if self.current_title_id is not None:
                 return self._set(None, "game_close_detected", line)
 
+        # ── [BGFT] GameStopped ─────────────────────────────────────────────
         m = _KLOG_BGFT_GAME_STOPPED.search(line)
         if m:
             tid = m.group(1).strip().upper()
             if self.current_title_id == tid:
                 return self._set(None, "bgft_game_stopped", line)
 
+        # ── ApplicationExitScene → ContentAreaScene ────────────────────────
         if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
             if self._pending_launch:
                 _LOGGER.debug(
@@ -339,6 +356,11 @@ def _parse_klog_line(
     hass: HomeAssistant, line: str, entry_data: dict[str, Any], entry_id: str
 ) -> bool:
     state_machine: KlogStateMachine = entry_data["klog_state_machine"]
+
+    for pattern in _KLOG_NOISE_PATTERNS:
+        if pattern.search(line):
+            return False
+
     state_changed = state_machine.ingest(line)
 
     klog_data = entry_data["klog_data"]
@@ -348,12 +370,13 @@ def _parse_klog_line(
     tid = klog_data.get(SENSOR_TITLE_ID)
     if tid:
         game_info = entry_data.get("game_map", {}).get(tid, {})
-        klog_data[SENSOR_GAME_NAME]  = game_info.get("name")
+        klog_data[SENSOR_GAME_NAME] = game_info.get("name")
         klog_data[SENSOR_GAME_COVER] = game_info.get("cover")
     else:
-        klog_data[SENSOR_GAME_NAME]  = None
+        klog_data[SENSOR_GAME_NAME] = None
         klog_data[SENSOR_GAME_COVER] = None
 
+    # ── PRX [SysInfo] temps + power ───────────────────────────────────────
     m = _KLOG_SYSINFO_PATTERN.search(line)
     if m:
         with contextlib.suppress(ValueError):
@@ -372,26 +395,8 @@ def _parse_klog_line(
             "title_id": klog_data.get(SENSOR_TITLE_ID),
         },
     )
+
     return state_changed
-
-
-# ── Merge helper ───────────────────────────────────────────────────────────────
-
-def _merge_into_coordinator(
-    base: dict[str, Any] | None,
-    patch: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Merge patch into base. Only overwrites a key with None if base has no
-    real value for it already — prevents FTP poll from wiping klog fields
-    and vice versa.
-    """
-    merged: dict[str, Any] = dict(base or {})
-    for key, value in patch.items():
-        if value is None and merged.get(key) is not None:
-            continue
-        merged[key] = value
-    return merged
 
 
 # ── Background tasks ───────────────────────────────────────────────────────────
@@ -403,28 +408,18 @@ async def _klog_listener_task(
     port: int,
     coordinator: DataUpdateCoordinator,
 ) -> None:
-    _LOGGER.info("Klog listener starting for %s:%d", host, port)
-    backoff = 10
-    max_backoff = 300
+    _LOGGER.info("Starting klog listener for %s:%d", host, port)
 
     while True:
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=10
             )
-            _LOGGER.info("Klog connected at %s:%d", host, port)
-            backoff = 10
+            _LOGGER.info("Connected to klog at %s:%d", host, port)
 
             entry_data = hass.data[DOMAIN].get(entry_id)
             if entry_data:
-                sm: KlogStateMachine = entry_data["klog_state_machine"]
-                sm.klog_connected = True
-                entry_data["klog_data"]["klog_connected"] = True
-                coordinator.async_set_updated_data(
-                    _merge_into_coordinator(
-                        coordinator.data, {"klog_connected": True}
-                    )
-                )
+                entry_data["klog_state_machine"].klog_connected = True
 
             text_buffer = ""
 
@@ -432,32 +427,29 @@ async def _klog_listener_task(
                 try:
                     chunk = await asyncio.wait_for(reader.read(4096), timeout=30.0)
                 except asyncio.TimeoutError:
-                    # keepalive — still connected, just no data
                     continue
 
                 if not chunk:
-                    _LOGGER.warning("Klog: connection closed by PS4")
+                    _LOGGER.warning("Klog connection closed by PS4")
                     break
 
                 text_buffer += chunk.decode("utf-8", errors="replace")
-                raw_lines = text_buffer.split("\n")
-                text_buffer = raw_lines[-1]
+                lines = text_buffer.split("\n")
+                text_buffer = lines[-1]
 
                 entry_data = hass.data[DOMAIN].get(entry_id)
                 if not entry_data:
                     break
 
                 changed = False
-                for raw in raw_lines[:-1]:
-                    line = raw.rstrip("\r")
+                for line in lines[:-1]:
+                    line = line.rstrip("\r")
                     if line and _parse_klog_line(hass, line, entry_data, entry_id):
                         changed = True
 
                 if changed:
                     coordinator.async_set_updated_data(
-                        _merge_into_coordinator(
-                            coordinator.data, entry_data["klog_data"]
-                        )
+                        {**(coordinator.data or {}), **entry_data["klog_data"]}
                     )
 
             writer.close()
@@ -465,31 +457,25 @@ async def _klog_listener_task(
                 await writer.wait_closed()
 
         except asyncio.CancelledError:
-            _LOGGER.info("Klog listener cancelled")
+            _LOGGER.info("Klog listener task cancelled")
             raise
         except Exception as err:
             err_str = str(err)
             if "111" in err_str or "Connect call failed" in err_str:
-                _LOGGER.debug("Klog unavailable %s:%d: %s", host, port, err)
+                _LOGGER.debug("Klog unavailable (PS4 off/rest) %s:%d: %s", host, port, err)
             else:
-                _LOGGER.warning("Klog error %s:%d: %s", host, port, err)
+                _LOGGER.warning("Klog connection error for %s:%d: %s", host, port, err)
 
-        # Mark disconnected — only touch klog_connected, nothing else
         entry_data = hass.data[DOMAIN].get(entry_id)
         if entry_data:
-            sm = entry_data["klog_state_machine"]
-            sm.klog_connected = False
+            entry_data["klog_state_machine"].klog_connected = False
             entry_data["klog_data"]["klog_connected"] = False
-            with contextlib.suppress(Exception):
-                coordinator.async_set_updated_data(
-                    _merge_into_coordinator(
-                        coordinator.data, {"klog_connected": False}
-                    )
-                )
+            coordinator.async_set_updated_data(
+                {**(coordinator.data or {}), **entry_data["klog_data"]}
+            )
 
-        _LOGGER.info("Klog reconnecting in %ds...", backoff)
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, max_backoff)
+        _LOGGER.info("Reconnecting to klog in 10s...")
+        await asyncio.sleep(10)
 
 
 async def _db_refresh_task(
@@ -510,7 +496,9 @@ async def _db_refresh_task(
                 ps4_db.download_and_parse, host, ftp_port
             )
             entry_data["game_map"] = game_map
-            _LOGGER.info("app.db refreshed for %s — %d titles", host, len(game_map))
+            _LOGGER.info(
+                "app.db refreshed for %s — %d titles loaded", host, len(game_map)
+            )
 
             klog_data = entry_data["klog_data"]
             tid = klog_data.get(SENSOR_TITLE_ID)
@@ -518,15 +506,57 @@ async def _db_refresh_task(
                 klog_data[SENSOR_GAME_NAME]  = game_map[tid].get("name")
                 klog_data[SENSOR_GAME_COVER] = game_map[tid].get("cover")
                 coordinator.async_set_updated_data(
-                    _merge_into_coordinator(coordinator.data, klog_data)
+                    {**(coordinator.data or {}), **klog_data}
                 )
 
         except asyncio.CancelledError:
+            _LOGGER.info("DB refresh task cancelled")
             raise
         except Exception as err:
-            _LOGGER.debug("app.db refresh failed for %s: %s", host, err)
+            _LOGGER.warning("app.db refresh failed for %s: %s", host, err)
 
         await asyncio.sleep(DB_REFRESH_INTERVAL)
+
+
+# ── WebSocket commands ─────────────────────────────────────────────────────────
+
+@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
+@websocket_api.async_response
+async def ws_list_entries(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    entries = hass.config_entries.async_entries(DOMAIN)
+    out = [
+        {
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "ps4_host": entry.data.get(CONF_PS4_HOST),
+            "ftp_port": entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT),
+            "binloader_port": entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT),
+            "klog_port": entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT),
+            "rpi_port": entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT),
+        }
+        for entry in entries
+    ]
+    connection.send_result(msg["id"], {"entries": out})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_payloads"})
+@websocket_api.async_response
+async def ws_list_payloads(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    try:
+        items = await hass.async_add_executor_job(_list_payloads_blocking, PAYLOAD_DIR)
+        connection.send_result(
+            msg["id"], {"payloads": items, "payload_dir": PAYLOAD_DIR}
+        )
+    except Exception as err:
+        connection.send_error(msg["id"], "list_error", str(err))
 
 
 # ── Config entry setup ─────────────────────────────────────────────────────────
@@ -534,60 +564,24 @@ async def _db_refresh_task(
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host           = entry.data[CONF_PS4_HOST]
     binloader_port = entry.data.get(CONF_BINLOADER_PORT, DEFAULT_BINLOADER_PORT)
-    ftp_port       = entry.data.get(CONF_FTP_PORT,       DEFAULT_FTP_PORT)
-    rpi_port       = entry.data.get(CONF_RPI_PORT,       DEFAULT_RPI_PORT)
-    klog_port      = entry.data.get(CONF_KLOG_PORT,      DEFAULT_KLOG_PORT)
+    ftp_port       = entry.data.get(CONF_FTP_PORT, DEFAULT_FTP_PORT)
+    rpi_port       = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
+    klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
-    # ── FTP poll — ONLY returns FTP-sourced fields, never touches klog state ──
     async def _poll_ftp() -> dict[str, Any]:
-        ftp_patch: dict[str, Any] = {}
-
         try:
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
             )
             writer.close()
             await writer.wait_closed()
-            ftp_patch["ftp_reachable"] = True
+            reachable = True
         except Exception:
-            ftp_patch["ftp_reachable"] = False
-            # Merge with existing coordinator data so klog fields are preserved
-            return _merge_into_coordinator(coordinator.data, ftp_patch)
-
-        def _fetch_state() -> dict[str, Any] | None:
-            try:
-                import ftplib
-                with ftplib.FTP() as ftp:
-                    ftp.connect(host, int(ftp_port), timeout=10)
-                    ftp.login()
-                    buf = io.BytesIO()
-                    ftp.retrbinary("RETR /user/temp/ps4_state.json", buf.write)
-                buf.seek(0)
-                return json.loads(buf.getvalue().decode("utf-8", errors="ignore"))
-            except Exception:
-                return None
-
-        state = await hass.async_add_executor_job(_fetch_state)
-        if isinstance(state, dict):
-            fw_version = state.get("fw_version")
-            fw_string  = state.get("fw_string")
-            hw_model   = state.get("hw_model")
-            cpu_temp_c = state.get("cpu_temp_c")
-
-            if fw_version is not None:
-                ftp_patch[SENSOR_FW_VERSION] = fw_version
-            if fw_string:
-                ftp_patch[SENSOR_FW_STRING] = str(fw_string)
-            if hw_model:
-                ftp_patch[SENSOR_HW_MODEL] = str(hw_model).strip()
-            if cpu_temp_c is not None:
-                try:
-                    ftp_patch[SENSOR_CPU_TEMP] = float(cpu_temp_c)
-                except (TypeError, ValueError):
-                    pass
-
-        # Always merge into existing coordinator data — never replace it
-        return _merge_into_coordinator(coordinator.data, ftp_patch)
+            reachable = False
+        entry_data = _ensure_domain_root(hass).get(entry.entry_id, {})
+        existing   = dict(entry_data.get("klog_data", {}))
+        existing["ftp_reachable"] = reachable
+        return existing
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -597,45 +591,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_interval=_FTP_POLL_INTERVAL,
     )
 
-    # Build initial coordinator data with all keys at safe defaults
-    # so sensors never get KeyError and klog_connected starts False
-    state_machine = KlogStateMachine()
-    _initial_data: dict[str, Any] = {
-        **state_machine.snapshot(),
-        SENSOR_CPU_TEMP:       None,
-        SENSOR_SOC_TEMP:       None,
-        SENSOR_GAME_NAME:      None,
-        SENSOR_GAME_COVER:     None,
-        SENSOR_KLOG_LAST_LINE: None,
-        SENSOR_SOC_POWER:      None,
-        SENSOR_CPU_POWER:      None,
-        SENSOR_GPU_POWER:      None,
-        SENSOR_TOTAL_POWER:    None,
-        SENSOR_FW_VERSION:     None,
-        SENSOR_FW_STRING:      None,
-        SENSOR_HW_MODEL:       None,
-        "ftp_reachable":       False,
-        "klog_connected":      False,
-    }
-    # Seed coordinator.data before first refresh so _poll_ftp can merge into it
-    coordinator.async_set_updated_data(_initial_data)
-
     await coordinator.async_config_entry_first_refresh()
 
     root = _ensure_domain_root(hass)
 
-    # Cancel any previous tasks from a prior setup of this entry
     prev = root.get(entry.entry_id)
     if isinstance(prev, dict):
-        tasks_to_cancel: list[asyncio.Task] = []
         for task_key in ("klog_task", "db_task"):
             t = prev.get(task_key)
             if t and not t.done():
-                t.cancel()
-                tasks_to_cancel.append(t)
-        if tasks_to_cancel:
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    t.cancel()
+
+    state_machine = KlogStateMachine()
 
     root[entry.entry_id] = {
         "coordinator":        coordinator,
@@ -645,8 +613,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "rpi_port":           rpi_port,
         "klog_port":          klog_port,
         "klog_state_machine": state_machine,
-        "klog_data":          dict(coordinator.data),  # stays in sync via klog task
-        "game_map":           {},
+        "klog_data": {
+            **state_machine.snapshot(),
+            SENSOR_CPU_TEMP:        None,
+            SENSOR_SOC_TEMP:        None,
+            SENSOR_GAME_NAME:       None,
+            SENSOR_GAME_COVER:      None,
+            SENSOR_KLOG_LAST_LINE:  None,
+            SENSOR_SOC_POWER:       None,
+            SENSOR_CPU_POWER:       None,
+            SENSOR_GPU_POWER:       None,
+            SENSOR_TOTAL_POWER:     None,
+            "ftp_reachable":        False,
+        },
+        "game_map": {},
     }
 
     klog_task = entry.async_create_background_task(
@@ -666,6 +646,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     g = _global(hass)
 
     if not g["ws_registered"]:
+        websocket_api.async_register_command(hass, ws_list_entries)
+        websocket_api.async_register_command(hass, ws_list_payloads)
         from .websocket import async_setup as async_setup_websocket
         async_setup_websocket(hass)
         g["ws_registered"] = True
@@ -706,9 +688,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
         hass.services.async_register(
-            DOMAIN,
-            _SVC_SEND_PAYLOAD,
-            handle_send_payload,
+            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
             schema=_SEND_PAYLOAD_SCHEMA,
         )
 
@@ -718,7 +698,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-# ── HTTP Views ─────────────────────────────────────────────────────────────────
+# ── HTTP views ─────────────────────────────────────────────────────────────────
 
 class PS4FTPDownloadView(HomeAssistantView):
     url = "/api/ps4_goldhen/ftp/download"
@@ -727,32 +707,26 @@ class PS4FTPDownloadView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         import ftplib
-        hass: HomeAssistant = request.app["hass"]
         entry_id = request.query.get("entry_id")
         path     = request.query.get("path")
         if not entry_id or not path:
             return web.Response(text="Missing entry_id or path", status=400)
-        data = _ensure_domain_root(hass).get(entry_id)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-
-        def _get():
+        def _get_file():
             buf = io.BytesIO()
             with ftplib.FTP() as ftp:
                 ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
                 ftp.retrbinary(f"RETR {path}", buf.write)
             return buf.getvalue()
-
         try:
-            content = await hass.async_add_executor_job(_get)
+            content = await request.app["hass"].async_add_executor_job(_get_file)
             return web.Response(
                 body=content,
                 content_type="application/octet-stream",
-                headers={
-                    "Content-Disposition":
-                        f'attachment; filename="{os.path.basename(path)}"'
-                },
+                headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
             )
         except Exception as err:
             return web.Response(text=f"FTP Error: {err}", status=500)
@@ -765,7 +739,6 @@ class PS4FTPUploadView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         import ftplib
-        hass: HomeAssistant = request.app["hass"]
         reader = await request.multipart()
         entry_id = path = file_field = None
         while True:
@@ -781,20 +754,17 @@ class PS4FTPUploadView(HomeAssistantView):
                 break
         if not all([entry_id, path, file_field]):
             return web.Response(text="Missing data", status=400)
-        data = _ensure_domain_root(hass).get(entry_id)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
         full_dest = (path.rstrip("/") + "/" + file_field.filename).replace("//", "/")
-
-        def _upload(content: bytes) -> None:
+        def _upload(content):
             with ftplib.FTP() as ftp:
                 ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
                 ftp.storbinary(f"STOR {full_dest}", io.BytesIO(content))
-
         try:
-            content = await file_field.read(decode=True)
-            await hass.async_add_executor_job(_upload, content)
+            await request.app["hass"].async_add_executor_job(_upload, await file_field.read(decode=True))
             return web.json_response({"success": True, "path": full_dest})
         except Exception as err:
             return web.Response(text=f"FTP Upload Error: {err}", status=500)
@@ -805,38 +775,29 @@ class PS4GameCoverView(HomeAssistantView):
     name = "api:ps4_goldhen:cover"
     requires_auth = False
 
-    async def get(
-        self, request: web.Request, entry_id: str, title_id: str
-    ) -> web.Response:
+    async def get(self, request: web.Request, entry_id: str, title_id: str) -> web.Response:
         import ftplib
-        hass: HomeAssistant = request.app["hass"]
-        data = _ensure_domain_root(hass).get(entry_id)
+        data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
         tid = title_id.strip().upper()
-        game_info  = data.get("game_map", {}).get(tid, {})
-        cdn_url    = game_info.get("cdn_cover")
+        game_info = data.get("game_map", {}).get(tid, {})
+        cdn_url = game_info.get("cdn_cover")
         if cdn_url and cdn_url.startswith("http"):
             raise web.HTTPFound(cdn_url)
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
-
-        def _fetch():
+        def _fetch_cover():
             buf = io.BytesIO()
             with ftplib.FTP() as ftp:
                 ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
                 ftp.login()
                 ftp.retrbinary(f"RETR {cover_path}", buf.write)
             return buf.getvalue()
-
         try:
-            img = await hass.async_add_executor_job(_fetch)
-            return web.Response(
-                body=img,
-                content_type="image/png",
-                headers={"Cache-Control": "max-age=86400"},
-            )
+            img_bytes = await request.app["hass"].async_add_executor_job(_fetch_cover)
+            return web.Response(body=img_bytes, content_type="image/png", headers={"Cache-Control": "max-age=86400"})
         except Exception as err:
-            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
+            _LOGGER.debug("Cover FTP fetch failed for %s: %s", tid, err)
             return web.Response(text=f"Cover not found: {err}", status=404)
 
 
@@ -849,16 +810,12 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry_data = _ensure_domain_root(hass).get(entry.entry_id)
     if entry_data:
-        tasks_to_cancel: list[asyncio.Task] = []
         for task_key in ("klog_task", "db_task"):
             t = entry_data.get(task_key)
             if t and not t.done():
                 t.cancel()
-                tasks_to_cancel.append(t)
-        if tasks_to_cancel:
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(t, return_exceptions=True)
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         _ensure_domain_root(hass).pop(entry.entry_id, None)

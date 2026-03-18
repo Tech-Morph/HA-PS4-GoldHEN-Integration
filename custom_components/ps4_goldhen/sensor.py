@@ -22,9 +22,6 @@ from .const import (
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
     SENSOR_TOTAL_POWER,
-    SENSOR_FW_VERSION,
-    SENSOR_FW_STRING,
-    SENSOR_HW_MODEL,
     HOME_SCREEN,
 )
 
@@ -52,8 +49,6 @@ async def async_setup_entry(
             PS4CPUPowerSensor(coordinator, entry),
             PS4GPUPowerSensor(coordinator, entry),
             PS4TotalPowerSensor(coordinator, entry),
-            PS4FirmwareSensor(coordinator, entry),
-            PS4HardwareModelSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -268,51 +263,3 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         return (self.coordinator.data or {}).get(SENSOR_TOTAL_POWER)
-
-
-class PS4FirmwareSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "Firmware Version"
-    _attr_icon = "mdi:sony-playstation"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_fw_version"
-
-    @property
-    def native_value(self) -> str | None:
-        data = self.coordinator.data or {}
-        fw_str = data.get(SENSOR_FW_STRING)
-        if fw_str:
-            return str(fw_str)
-        fw_num = data.get(SENSOR_FW_VERSION)
-        if isinstance(fw_num, (int, float)):
-            v = int(fw_num)
-            if v >= 1000:
-                v //= 1000
-            major, minor = divmod(v, 100)
-            return f"{major}.{minor:02d}"
-        return None
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        data = self.coordinator.data or {}
-        return {
-            "fw_version_raw": data.get(SENSOR_FW_VERSION),
-        }
-
-
-class PS4HardwareModelSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "Hardware Model"
-    _attr_icon = "mdi:console"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_hw_model"
-
-    @property
-    def native_value(self) -> str | None:
-        data = self.coordinator.data or {}
-        hw = data.get(SENSOR_HW_MODEL)
-        return hw.strip() if isinstance(hw, str) and hw.strip() else None
