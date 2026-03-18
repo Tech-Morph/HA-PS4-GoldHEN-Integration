@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import ftplib
 import io
-import os
-import stat
 from datetime import datetime
 from typing import Any
 
@@ -105,36 +103,69 @@ def _ftp_connect(host: str, port: int) -> ftplib.FTP:
     return ftp
 
 
+def _parse_list_timestamp(month: str, day: str, time_or_year: str) -> str:
+    """
+    Parse standard UNIX-like LIST timestamps and return ISO 8601 string.
+    - If time_or_year contains ':', treat it as HH:MM in current year.
+    - Otherwise treat it as a 4-digit year.
+    """
+    now = datetime.now()
+    try:
+        if ":" in time_or_year:
+            # format: 'Jun  5 14:32'
+            dt_str = f"{month} {day} {now.year} {time_or_year}"
+            dt = datetime.strptime(dt_str, "%b %d %Y %H:%M")
+        else:
+            # format: 'Jun  5 2024'
+            dt_str = f"{month} {day} {time_or_year} 00:00"
+            dt = datetime.strptime(dt_str, "%b %d %Y %H:%M")
+    except Exception:
+        return ""
+    return dt.isoformat(timespec="seconds")
+
+
 def _ftp_list_dir(host: str, port: int, path: str) -> dict[str, Any]:
-    entries = []
+    entries: list[dict[str, Any]] = []
     with _ftp_connect(host, port) as ftp:
         ftp.cwd(path)
         cwd = ftp.pwd()
-        lines = []
+        lines: list[str] = []
         ftp.retrlines("LIST", lines.append)
-        for line in lines:
-            parts = line.split(None, 8)
-            if len(parts) < 9:
-                continue
-            perms    = parts[0]
-            size_str = parts[4]
-            name     = parts[8]
-            mod_str  = " ".join(parts[5:8])
-            if name in (".", ".."):
-                continue
-            is_dir = perms.startswith("d")
-            full   = (cwd.rstrip("/") + "/" + name)
-            try:
-                size = int(size_str)
-            except ValueError:
-                size = 0
-            entries.append({
+
+    for line in lines:
+        # Typical: '-rw-r--r-- 1 user group 1048576 Jun  5 14:32 file.bin'
+        parts = line.split(None, 8)
+        if len(parts) < 9:
+            continue
+        perms          = parts[0]
+        size_str       = parts[4]
+        month          = parts[5]
+        day            = parts[6]
+        time_or_year   = parts[7]
+        name           = parts[8]
+
+        if name in (".", ".."):
+            continue
+
+        is_dir = perms.startswith("d")
+        full   = (cwd.rstrip("/") + "/" + name)
+
+        try:
+            size = int(size_str)
+        except ValueError:
+            size = 0
+
+        modified_iso = _parse_list_timestamp(month, day, time_or_year)
+        entries.append(
+            {
                 "name":     name,
                 "path":     full,
                 "is_dir":   is_dir,
                 "size":     size,
-                "modified": mod_str,
-            })
+                "modified": modified_iso,
+            }
+        )
+
     return {"path": cwd, "entries": entries}
 
 
@@ -320,15 +351,20 @@ async def ws_get_klog_history(
         return
     sm = data.get("klog_state_machine")
     if not sm:
-        connection.send_result(msg["id"], {"lines": [], "total": 0, "klog_connected": False})
+        connection.send_result(
+            msg["id"], {"lines": [], "total": 0, "klog_connected": False}
+        )
         return
     limit = max(1, min(msg.get("limit", 100), 250))
     lines = list(sm.recent_lines)[-limit:]
-    connection.send_result(msg["id"], {
-        "lines":         lines,
-        "total":         len(sm.recent_lines),
-        "klog_connected": sm.klog_connected,
-    })
+    connection.send_result(
+        msg["id"],
+        {
+            "lines":         lines,
+            "total":         len(sm.recent_lines),
+            "klog_connected": sm.klog_connected,
+        },
+    )
 
 
 # ── subscribe_klog ─────────────────────────────────────────────────────────────
@@ -351,12 +387,17 @@ async def ws_subscribe_klog(
     def _forward(event) -> None:
         if event.data.get("entry_id") != entry_id:
             return
-        connection.send_event(msg["id"], {
-            "message":  event.data.get("message"),
-            "title_id": event.data.get("title_id"),
-        })
+        connection.send_event(
+            msg["id"],
+            {
+                "message":  event.data.get("message"),
+                "title_id": event.data.get("title_id"),
+            },
+        )
 
-    connection.subscriptions[msg["id"]] = hass.bus.async_listen(EVENT_KLOG_LINE, _forward)
+    connection.subscriptions[msg["id"]] = hass.bus.async_listen(
+        EVENT_KLOG_LINE, _forward
+    )
     connection.send_result(msg["id"], {"subscribed": True})
 
 
