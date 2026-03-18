@@ -33,13 +33,6 @@ A fully local Home Assistant integration and sidebar panel for managing a **PS4 
 
 To enable temperature, power, and fan sensors, install the **PS4StateJSON** PRX as a GoldHEN plugin. This replaces the older `SysInfo.prx` approach — telemetry is now written to a JSON file on the PS4 filesystem and polled by HA over FTP rather than parsed from klog.
 
-**Build from source:**
-
-```bash
-cd ~/ps4_tools/PS4StateJSON && make && \
-  curl -T PS4StateJSON.prx ftp://<PS4_IP>:2121/data/GoldHEN/plugins/PS4StateJSON.prx
-Install:
-
 Copy PS4StateJSON.prx to /data/GoldHEN/plugins/ on your PS4 (via FTP).
 
 Create or edit /data/GoldHEN/plugins/plugin.ini to include:
