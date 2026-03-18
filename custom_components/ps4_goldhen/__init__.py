@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import os
 import re
@@ -60,7 +61,12 @@ from . import db as ps4_db
 
 _LOGGER = logging.getLogger(__name__)
 
-_FTP_POLL_INTERVAL = timedelta(seconds=30)
+# ── Changed: 5s interval, drives FTP JSON poll ─────────────────────────────────
+_FTP_POLL_INTERVAL = timedelta(seconds=5)
+
+# Path written by PS4StateJSON.prx
+_PS4STATE_JSON_PATH = "/data/GoldHEN/ps4_state.json"
+
 _SVC_SEND_PAYLOAD = "send_payload"
 
 _PANEL_URL_PATH = "ps4_goldhen"
@@ -101,14 +107,6 @@ _KLOG_BGFT_GAME_STOPPED = re.compile(
 )
 _KLOG_EXIT_TO_HOME_PATTERN = re.compile(
     r"OnFocusActiveSceneChanged\s+\[ApplicationExitScene\s*:\s*ApplicationExitScene\]\s*->\s*\[ContentAreaScene\s*:\s*ContentAreaScene\]",
-    re.IGNORECASE,
-)
-
-# ── PRX SysInfo line ───────────────────────────────────────────────────────────────
-# Format: [SysInfo] [6] CPU:59C SoC:56C | SoC:12329mW CPU:1156mW GPU:10666mW Tot:19796mW
-_KLOG_SYSINFO_PATTERN = re.compile(
-    r"\[SysInfo\].*CPU:(\d+)C\s+SoC:(\d+)C"
-    r".*?SoC:(\d+)mW\s+CPU:(\d+)mW\s+GPU:(\d+)mW\s+Tot:(\d+)mW",
     re.IGNORECASE,
 )
 
@@ -281,7 +279,6 @@ class KlogStateMachine:
             if pattern.search(line):
                 return False
 
-        # ── [SL] AppFocusChanged ───────────────────────────────────────────
         m = _KLOG_SL_FOCUS_PATTERN.search(line)
         if m:
             new_app = m.group(2).strip().upper()
@@ -298,7 +295,6 @@ class KlogStateMachine:
                     return self._set(None, "sl_focus_home", line)
             return False
 
-        # ── [BGFT] GameWillStart ───────────────────────────────────────────
         m = _KLOG_BGFT_GAME_START.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -306,7 +302,6 @@ class KlogStateMachine:
                 self._pending_launch = tid
                 return self._set(tid, "bgft_game_will_start", line)
 
-        # ── [SceLncService] launchApp ──────────────────────────────────────
         m = _KLOG_LNC_LAUNCH_PATTERN.search(line)
         if m:
             tid = m.group(1).strip().upper()
@@ -316,19 +311,16 @@ class KlogStateMachine:
                 self.last_signal_line = line[-300:]
                 return False
 
-        # ── Game Close detected ────────────────────────────────────────────
         if _KLOG_GAME_CLOSE_PATTERN.search(line):
             if self.current_title_id is not None:
                 return self._set(None, "game_close_detected", line)
 
-        # ── [BGFT] GameStopped ─────────────────────────────────────────────
         m = _KLOG_BGFT_GAME_STOPPED.search(line)
         if m:
             tid = m.group(1).strip().upper()
             if self.current_title_id == tid:
                 return self._set(None, "bgft_game_stopped", line)
 
-        # ── ApplicationExitScene → ContentAreaScene ────────────────────────
         if _KLOG_EXIT_TO_HOME_PATTERN.search(line):
             if self._pending_launch:
                 _LOGGER.debug(
@@ -370,22 +362,13 @@ def _parse_klog_line(
     tid = klog_data.get(SENSOR_TITLE_ID)
     if tid:
         game_info = entry_data.get("game_map", {}).get(tid, {})
-        klog_data[SENSOR_GAME_NAME] = game_info.get("name")
+        klog_data[SENSOR_GAME_NAME]  = game_info.get("name")
         klog_data[SENSOR_GAME_COVER] = game_info.get("cover")
     else:
-        klog_data[SENSOR_GAME_NAME] = None
+        klog_data[SENSOR_GAME_NAME]  = None
         klog_data[SENSOR_GAME_COVER] = None
 
-    # ── PRX [SysInfo] temps + power ───────────────────────────────────────
-    m = _KLOG_SYSINFO_PATTERN.search(line)
-    if m:
-        with contextlib.suppress(ValueError):
-            klog_data[SENSOR_CPU_TEMP]    = float(m.group(1))
-            klog_data[SENSOR_SOC_TEMP]    = float(m.group(2))
-            klog_data[SENSOR_SOC_POWER]   = int(m.group(3))
-            klog_data[SENSOR_CPU_POWER]   = int(m.group(4))
-            klog_data[SENSOR_GPU_POWER]   = int(m.group(5))
-            klog_data[SENSOR_TOTAL_POWER] = int(m.group(6))
+    # NOTE: SysInfo klog regex removed — temps/power now come from FTP JSON poll
 
     hass.bus.async_fire(
         EVENT_KLOG_LINE,
@@ -559,6 +542,105 @@ async def ws_list_payloads(
         connection.send_error(msg["id"], "list_error", str(err))
 
 
+# ── FTP JSON poll (replaces SysInfo klog parsing) ──────────────────────────────
+
+async def _poll_ftp_json(
+    host: str,
+    ftp_port: int,
+    entry_id: str,
+    hass: HomeAssistant,
+    coordinator: DataUpdateCoordinator,
+) -> dict[str, Any]:
+    """Fetch ps4_state.json via raw FTP and merge into coordinator data."""
+    entry_data = _ensure_domain_root(hass).get(entry_id, {})
+    existing   = dict(entry_data.get("klog_data", {}))
+
+    reader = writer = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
+        )
+
+        async def _readline() -> str:
+            return (await reader.readline()).decode(errors="ignore")
+
+        def _send(cmd: str) -> None:
+            writer.write((cmd + "\r\n").encode())
+
+        await _readline()  # banner
+
+        _send("USER anonymous")
+        await _readline()  # 230
+
+        _send("TYPE I")
+        await _readline()  # 200
+
+        _send("PASV")
+        pasv_line = await _readline()
+        start = pasv_line.find("(")
+        end   = pasv_line.find(")", start + 1)
+        if start == -1 or end == -1:
+            raise ValueError(f"PASV parse error: {pasv_line!r}")
+        nums      = pasv_line[start + 1 : end].split(",")
+        data_host = ".".join(nums[:4])
+        data_port = (int(nums[4]) << 8) + int(nums[5])
+
+        dreader, dwriter = await asyncio.wait_for(
+            asyncio.open_connection(data_host, data_port), timeout=TCP_PROBE_TIMEOUT
+        )
+
+        _send(f"RETR {_PS4STATE_JSON_PATH}")
+        await _readline()  # 150
+
+        chunks: list[bytes] = []
+        while True:
+            chunk = await dreader.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        dwriter.close()
+        with contextlib.suppress(Exception):
+            await dwriter.wait_closed()
+
+        await _readline()  # 226 Transfer complete
+
+        body = b"".join(chunks).decode(errors="ignore").strip()
+        if body:
+            parsed = json.loads(body)
+            existing[SENSOR_CPU_TEMP]    = parsed.get("cpu_temp")
+            existing[SENSOR_SOC_TEMP]    = parsed.get("soc_temp")
+            existing[SENSOR_SOC_POWER]   = parsed.get("soc_power_w")
+            existing[SENSOR_CPU_POWER]   = parsed.get("cpu_power_w")
+            existing[SENSOR_GPU_POWER]   = parsed.get("gpu_power_w")
+            existing[SENSOR_TOTAL_POWER] = parsed.get("total_power_w")
+
+        existing["ftp_reachable"] = True
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("PS4StateJSON FTP poll failed (%s): %s", host, err)
+        existing["ftp_reachable"] = False
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    # Keep klog_data in sync so klog events can still push updates
+    if entry_id in _ensure_domain_root(hass):
+        _ensure_domain_root(hass)[entry_id]["klog_data"].update(
+            {k: existing[k] for k in (
+                SENSOR_CPU_TEMP, SENSOR_SOC_TEMP,
+                SENSOR_SOC_POWER, SENSOR_CPU_POWER,
+                SENSOR_GPU_POWER, SENSOR_TOTAL_POWER,
+                "ftp_reachable",
+            ) if k in existing}
+        )
+
+    return existing
+
+
 # ── Config entry setup ─────────────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -568,45 +650,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     rpi_port       = entry.data.get(CONF_RPI_PORT, DEFAULT_RPI_PORT)
     klog_port      = entry.data.get(CONF_KLOG_PORT, DEFAULT_KLOG_PORT)
 
-    async def _poll_ftp() -> dict[str, Any]:
-        try:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
-            )
-            writer.close()
-            await writer.wait_closed()
-            reachable = True
-        except Exception:
-            reachable = False
-        entry_data = _ensure_domain_root(hass).get(entry.entry_id, {})
-        existing   = dict(entry_data.get("klog_data", {}))
-        existing["ftp_reachable"] = reachable
-        return existing
-
-    coordinator = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name=f"{DOMAIN}_{host}",
-        update_method=_poll_ftp,
-        update_interval=_FTP_POLL_INTERVAL,
-    )
-
-    await coordinator.async_config_entry_first_refresh()
-
-    root = _ensure_domain_root(hass)
-
-    prev = root.get(entry.entry_id)
-    if isinstance(prev, dict):
-        for task_key in ("klog_task", "db_task"):
-            t = prev.get(task_key)
-            if t and not t.done():
-                with contextlib.suppress(Exception):
-                    t.cancel()
-
+    root          = _ensure_domain_root(hass)
     state_machine = KlogStateMachine()
 
+    # Pre-populate entry so _poll_ftp_json can find klog_data on first refresh
     root[entry.entry_id] = {
-        "coordinator":        coordinator,
         "host":               host,
         "binloader_port":     binloader_port,
         "ftp_port":           ftp_port,
@@ -615,19 +663,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "klog_state_machine": state_machine,
         "klog_data": {
             **state_machine.snapshot(),
-            SENSOR_CPU_TEMP:        None,
-            SENSOR_SOC_TEMP:        None,
-            SENSOR_GAME_NAME:       None,
-            SENSOR_GAME_COVER:      None,
-            SENSOR_KLOG_LAST_LINE:  None,
-            SENSOR_SOC_POWER:       None,
-            SENSOR_CPU_POWER:       None,
-            SENSOR_GPU_POWER:       None,
-            SENSOR_TOTAL_POWER:     None,
-            "ftp_reachable":        False,
+            SENSOR_CPU_TEMP:       None,
+            SENSOR_SOC_TEMP:       None,
+            SENSOR_GAME_NAME:      None,
+            SENSOR_GAME_COVER:     None,
+            SENSOR_KLOG_LAST_LINE: None,
+            SENSOR_SOC_POWER:      None,
+            SENSOR_CPU_POWER:      None,
+            SENSOR_GPU_POWER:      None,
+            SENSOR_TOTAL_POWER:    None,
+            "ftp_reachable":       False,
         },
         "game_map": {},
     }
+
+    async def _poll_update() -> dict[str, Any]:
+        return await _poll_ftp_json(host, ftp_port, entry.entry_id, hass, coordinator)
+
+    coordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=f"{DOMAIN}_{host}",
+        update_method=_poll_update,
+        update_interval=_FTP_POLL_INTERVAL,
+    )
+
+    await coordinator.async_config_entry_first_refresh()
+    root[entry.entry_id]["coordinator"] = coordinator
 
     klog_task = entry.async_create_background_task(
         hass,
@@ -780,9 +842,9 @@ class PS4GameCoverView(HomeAssistantView):
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
-        tid = title_id.strip().upper()
+        tid       = title_id.strip().upper()
         game_info = data.get("game_map", {}).get(tid, {})
-        cdn_url = game_info.get("cdn_cover")
+        cdn_url   = game_info.get("cdn_cover")
         if cdn_url and cdn_url.startswith("http"):
             raise web.HTTPFound(cdn_url)
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
