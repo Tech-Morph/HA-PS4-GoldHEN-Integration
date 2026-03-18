@@ -48,7 +48,6 @@ Create or edit /data/GoldHEN/plugins/plugin.ini to include:
 /data/GoldHEN/plugins/PS4StateJSON.prx
 Cold boot the PS4. The PRX starts a background thread that writes telemetry to /data/GoldHEN/ps4_state.json every 10 seconds, in the format:
 
-json
 {
   "cpu_temp": 71,
   "soc_temp": 70,
