@@ -5,6 +5,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, UnitOfPower
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -22,6 +23,10 @@ from .const import (
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
     SENSOR_TOTAL_POWER,
+    SENSOR_FAN_DUTY,
+    SENSOR_FW_VERSION,
+    SENSOR_HW_MODEL,
+    SENSOR_CONSOLE_ID,
     HOME_SCREEN,
 )
 
@@ -49,6 +54,10 @@ async def async_setup_entry(
             PS4CPUPowerSensor(coordinator, entry),
             PS4GPUPowerSensor(coordinator, entry),
             PS4TotalPowerSensor(coordinator, entry),
+            PS4FanDutySensor(coordinator, entry),
+            PS4FWVersionSensor(coordinator, entry),
+            PS4HWModelSensor(coordinator, entry),
+            PS4ConsoleIDSensor(coordinator, entry),
         ],
         update_before_add=False,
     )
@@ -263,3 +272,65 @@ class PS4TotalPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         return (self.coordinator.data or {}).get(SENSOR_TOTAL_POWER)
+
+
+class PS4FanDutySensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Fan Duty"
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:fan"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_fan_duty"
+
+    @property
+    def native_value(self) -> int | None:
+        val = (self.coordinator.data or {}).get(SENSOR_FAN_DUTY)
+        return int(val) if val is not None else None
+
+
+class PS4FWVersionSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Firmware Version"
+    _attr_icon = "mdi:tag"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_fw_version"
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.coordinator.data or {}).get(SENSOR_FW_VERSION)
+
+
+class PS4HWModelSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Hardware Model"
+    _attr_icon = "mdi:sony-playstation"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_hw_model"
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.coordinator.data or {}).get(SENSOR_HW_MODEL)
+
+
+class PS4ConsoleIDSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Console ID"
+    _attr_icon = "mdi:identifier"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.data[CONF_PS4_HOST]}_console_id"
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.coordinator.data or {}).get(SENSOR_CONSOLE_ID)
