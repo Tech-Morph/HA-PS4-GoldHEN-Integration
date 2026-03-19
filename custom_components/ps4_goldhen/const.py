@@ -35,6 +35,12 @@ SENSOR_CPU_POWER   = "cpu_power_w"
 SENSOR_GPU_POWER   = "gpu_power_w"
 SENSOR_TOTAL_POWER = "total_power_w"
 
+# — New PS4StateJSON v14 keys ————————————————————————————————————————————————
+SENSOR_FAN_DUTY   = "fan_duty"
+SENSOR_FW_VERSION = "fw_version"
+SENSOR_HW_MODEL   = "hw_model"
+SENSOR_CONSOLE_ID = "console_id"
+
 EVENT_KLOG_LINE = "ps4_goldhen_klog_event"
 HOME_SCREEN     = "PlayStation Home Screen"
 
