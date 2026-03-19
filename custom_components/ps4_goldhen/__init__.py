@@ -51,6 +51,10 @@ from .const import (
     SENSOR_CPU_POWER,
     SENSOR_GPU_POWER,
     SENSOR_TOTAL_POWER,
+    SENSOR_FAN_DUTY,
+    SENSOR_FW_VERSION,
+    SENSOR_HW_MODEL,
+    SENSOR_CONSOLE_ID,
     EVENT_KLOG_LINE,
     HOME_SCREEN,
     APP_DB_REMOTE,
@@ -61,12 +65,8 @@ from . import db as ps4_db
 
 _LOGGER = logging.getLogger(__name__)
 
-# ── Changed: 5s interval, drives FTP JSON poll ─────────────────────────────────
 _FTP_POLL_INTERVAL = timedelta(seconds=5)
-
-# Path written by PS4StateJSON.prx
 _PS4STATE_JSON_PATH = "/data/GoldHEN/ps4_state.json"
-
 _SVC_SEND_PAYLOAD = "send_payload"
 
 _PANEL_URL_PATH = "ps4_goldhen"
@@ -87,7 +87,6 @@ _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
 
-# ── Primary signals ────────────────────────────────────────────────────────────
 _KLOG_SL_FOCUS_PATTERN = re.compile(
     r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
     re.IGNORECASE,
@@ -110,7 +109,6 @@ _KLOG_EXIT_TO_HOME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# ── Noise filter ───────────────────────────────────────────────────────────────
 _KLOG_NOISE_PATTERNS = (
     re.compile(r"\bD88391\b", re.IGNORECASE),
     re.compile(r"\bfrom tbl_appbrowse_", re.IGNORECASE),
@@ -123,8 +121,6 @@ _KLOG_NOISE_PATTERNS = (
     re.compile(r"uhub\d+: giving up port", re.IGNORECASE),
 )
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _ensure_domain_root(hass: HomeAssistant) -> dict[str, Any]:
     hass.data.setdefault(DOMAIN, {})
@@ -249,8 +245,6 @@ def _is_real_game_title_id(value: str | None) -> bool:
     return bool(_TITLE_ID_RE.fullmatch(value)) and not value.startswith("NPXS")
 
 
-# ── Klog state machine ─────────────────────────────────────────────────────────
-
 class KlogStateMachine:
     def __init__(self) -> None:
         self.current_title_id: str | None = None
@@ -342,8 +336,6 @@ class KlogStateMachine:
         return changed
 
 
-# ── Klog line parser ───────────────────────────────────────────────────────────
-
 def _parse_klog_line(
     hass: HomeAssistant, line: str, entry_data: dict[str, Any], entry_id: str
 ) -> bool:
@@ -368,8 +360,6 @@ def _parse_klog_line(
         klog_data[SENSOR_GAME_NAME]  = None
         klog_data[SENSOR_GAME_COVER] = None
 
-    # NOTE: SysInfo klog regex removed — temps/power now come from FTP JSON poll
-
     hass.bus.async_fire(
         EVENT_KLOG_LINE,
         {
@@ -381,8 +371,6 @@ def _parse_klog_line(
 
     return state_changed
 
-
-# ── Background tasks ───────────────────────────────────────────────────────────
 
 async def _klog_listener_task(
     hass: HomeAssistant,
@@ -501,8 +489,6 @@ async def _db_refresh_task(
         await asyncio.sleep(DB_REFRESH_INTERVAL)
 
 
-# ── WebSocket commands ─────────────────────────────────────────────────────────
-
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
 @websocket_api.async_response
 async def ws_list_entries(
@@ -542,7 +528,7 @@ async def ws_list_payloads(
         connection.send_error(msg["id"], "list_error", str(err))
 
 
-# ── FTP JSON poll (replaces SysInfo klog parsing) ──────────────────────────────
+# ── FTP JSON poll ──────────────────────────────────────────────────────────────
 
 async def _poll_ftp_json(
     host: str,
@@ -607,12 +593,18 @@ async def _poll_ftp_json(
         body = b"".join(chunks).decode(errors="ignore").strip()
         if body:
             parsed = json.loads(body)
+            # Telemetry
             existing[SENSOR_CPU_TEMP]    = parsed.get("cpu_temp")
             existing[SENSOR_SOC_TEMP]    = parsed.get("soc_temp")
             existing[SENSOR_SOC_POWER]   = parsed.get("soc_power_w")
             existing[SENSOR_CPU_POWER]   = parsed.get("cpu_power_w")
             existing[SENSOR_GPU_POWER]   = parsed.get("gpu_power_w")
             existing[SENSOR_TOTAL_POWER] = parsed.get("total_power_w")
+            # v14 additions
+            existing[SENSOR_FAN_DUTY]   = parsed.get("fan_duty")
+            existing[SENSOR_FW_VERSION] = parsed.get("fw_version")
+            existing[SENSOR_HW_MODEL]   = parsed.get("hw_model")
+            existing[SENSOR_CONSOLE_ID] = parsed.get("console_id")
 
         existing["ftp_reachable"] = True
 
@@ -627,13 +619,14 @@ async def _poll_ftp_json(
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
-    # Keep klog_data in sync so klog events can still push updates
     if entry_id in _ensure_domain_root(hass):
         _ensure_domain_root(hass)[entry_id]["klog_data"].update(
             {k: existing[k] for k in (
                 SENSOR_CPU_TEMP, SENSOR_SOC_TEMP,
                 SENSOR_SOC_POWER, SENSOR_CPU_POWER,
                 SENSOR_GPU_POWER, SENSOR_TOTAL_POWER,
+                SENSOR_FAN_DUTY, SENSOR_FW_VERSION,
+                SENSOR_HW_MODEL, SENSOR_CONSOLE_ID,
                 "ftp_reachable",
             ) if k in existing}
         )
@@ -653,7 +646,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     root          = _ensure_domain_root(hass)
     state_machine = KlogStateMachine()
 
-    # Pre-populate entry so _poll_ftp_json can find klog_data on first refresh
     root[entry.entry_id] = {
         "host":               host,
         "binloader_port":     binloader_port,
@@ -672,6 +664,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SENSOR_CPU_POWER:      None,
             SENSOR_GPU_POWER:      None,
             SENSOR_TOTAL_POWER:    None,
+            SENSOR_FAN_DUTY:       None,
+            SENSOR_FW_VERSION:     None,
+            SENSOR_HW_MODEL:       None,
+            SENSOR_CONSOLE_ID:     None,
             "ftp_reachable":       False,
         },
         "game_map": {},
