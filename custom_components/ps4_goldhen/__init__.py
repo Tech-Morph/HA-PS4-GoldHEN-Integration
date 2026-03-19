@@ -65,7 +65,7 @@ from . import db as ps4_db
 
 _LOGGER = logging.getLogger(__name__)
 
-_FTP_POLL_INTERVAL = timedelta(seconds=5)
+_FTP_POLL_INTERVAL = timedelta(seconds=3)
 _PS4STATE_JSON_PATH = "/data/GoldHEN/ps4_state.json"
 _SVC_SEND_PAYLOAD = "send_payload"
 
