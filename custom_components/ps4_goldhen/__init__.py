@@ -74,9 +74,9 @@ _PANEL_SIDEBAR_TITLE  = "PS4 GoldHEN"
 _PANEL_SIDEBAR_ICON   = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT   = "ps4-goldhen-panel"
 
-_JS_STATIC_URL           = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL           = f"{_JS_STATIC_URL}?v=1.0.0"
-_LOGO_STATIC_URL         = "/api/ps4_goldhen/frontend/goldhen_logo.png"
+_JS_STATIC_URL            = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
+_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=1.0.0"
+_LOGO_STATIC_URL          = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
 _BUNDLED_PAYLOADS_DIRNAME = "bundled_payloads"
@@ -346,6 +346,36 @@ class KlogStateMachine:
 
 # ── Klog line parser ───────────────────────────────────────────────────────────
 
+async def _force_db_refresh(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    entry_data = hass.data[DOMAIN].get(entry_id)
+    if not entry_data:
+        return
+    try:
+        game_map = await hass.async_add_executor_job(
+            ps4_db.download_and_parse,
+            entry_data["host"],
+            entry_data["ftp_port"],
+        )
+        entry_data["game_map"] = game_map
+        klog_data = entry_data["klog_data"]
+        tid = klog_data.get(SENSOR_TITLE_ID)
+        if tid and tid in game_map:
+            klog_data[SENSOR_GAME_NAME]  = game_map[tid].get("name")
+            klog_data[SENSOR_GAME_COVER] = game_map[tid].get("cover")
+            coordinator.async_set_updated_data(
+                {**(coordinator.data or {}), **klog_data}
+            )
+        _LOGGER.info(
+            "[ps4_goldhen] force db refresh done — %d titles", len(game_map)
+        )
+    except Exception as err:
+        _LOGGER.warning("[ps4_goldhen] force db refresh failed: %s", err)
+
+
 def _parse_klog_line(
     hass: HomeAssistant,
     line: str,
@@ -369,6 +399,13 @@ def _parse_klog_line(
         game_info = entry_data.get("game_map", {}).get(tid, {})
         klog_data[SENSOR_GAME_NAME]  = game_info.get("name")
         klog_data[SENSOR_GAME_COVER] = game_info.get("cover")
+        # game_map empty or title missing — refresh app.db immediately
+        if not game_info.get("name"):
+            coordinator = entry_data.get("coordinator")
+            if coordinator:
+                asyncio.ensure_future(
+                    _force_db_refresh(hass, entry_id, coordinator)
+                )
     else:
         klog_data[SENSOR_GAME_NAME]  = None
         klog_data[SENSOR_GAME_COVER] = None
@@ -908,3 +945,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         _ensure_domain_root(hass).pop(entry.entry_id, None)
     return unload_ok
+
