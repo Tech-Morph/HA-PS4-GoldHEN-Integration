@@ -46,4 +46,4 @@ HOME_SCREEN     = "PlayStation Home Screen"
 
 APP_DB_REMOTE        = "/system_data/priv/mms/app.db"
 APP_DB_LOCAL         = "ps4_app.db"
-DB_REFRESH_INTERVAL  = 3600
+DB_REFRESH_INTERVAL  = 300
