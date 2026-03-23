@@ -39,6 +39,7 @@ from .const import (
     DEFAULT_RPI_PORT,
     DEFAULT_KLOG_PORT,
     PAYLOAD_DIR,
+    COVER_CACHE_DIR,
     TCP_PROBE_TIMEOUT,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
@@ -249,6 +250,51 @@ def _is_real_game_title_id(value: str | None) -> bool:
         return False
     value = value.strip().upper()
     return bool(_TITLE_ID_RE.fullmatch(value)) and not value.startswith("NPXS")
+
+
+# ── Cover image disk cache ─────────────────────────────────────────────────────
+
+def _cover_cache_path(tid: str) -> Path:
+    return Path(COVER_CACHE_DIR) / f"{tid.upper()}.png"
+
+
+def _fetch_cover_ftp(host: str, ftp_port: int, cover_path: str) -> bytes:
+    """Blocking FTP fetch of a cover image from the PS4."""
+    import ftplib
+    buf = io.BytesIO()
+    with ftplib.FTP() as ftp:
+        ftp.connect(host, ftp_port, timeout=15)
+        ftp.login()
+        ftp.retrbinary(f"RETR {cover_path}", buf.write)
+    return buf.getvalue()
+
+
+def _read_or_fetch_cover(host: str, ftp_port: int, tid: str, cover_path: str) -> bytes:
+    """
+    Blocking helper — returns cover PNG bytes.
+    1. Check /config/ps4/covers/{TID}.png — return cached bytes if present.
+    2. FTP-fetch from PS4, write to cache, return bytes.
+    """
+    cache_file = _cover_cache_path(tid)
+
+    if cache_file.exists():
+        _LOGGER.debug("[ps4_goldhen] Cover cache hit: %s", cache_file)
+        return cache_file.read_bytes()
+
+    _LOGGER.debug("[ps4_goldhen] Cover cache miss for %s — fetching via FTP", tid)
+    img_bytes = _fetch_cover_ftp(host, ftp_port, cover_path)
+
+    # Persist to cache
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_bytes(img_bytes)
+        _LOGGER.debug("[ps4_goldhen] Cover cached: %s", cache_file)
+    except Exception as err:
+        _LOGGER.warning(
+            "[ps4_goldhen] Could not write cover cache for %s: %s", tid, err
+        )
+
+    return img_bytes
 
 
 # ── Klog state machine ─────────────────────────────────────────────────────────
@@ -897,32 +943,35 @@ class PS4GameCoverView(HomeAssistantView):
     async def get(
         self, request: web.Request, entry_id: str, title_id: str
     ) -> web.Response:
-        import ftplib
         data = _ensure_domain_root(request.app["hass"]).get(entry_id)
         if not data:
             return web.Response(text="Entry not found", status=404)
+
         tid       = title_id.strip().upper()
         game_info = data.get("game_map", {}).get(tid, {})
-        cdn_url   = game_info.get("cdn_cover")
+
+        # Prefer Sony CDN redirect — no local caching needed, browser handles it
+        cdn_url = game_info.get("cdn_cover")
         if cdn_url and cdn_url.startswith("http"):
             raise web.HTTPFound(cdn_url)
+
         cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
-        def _fetch_cover():
-            buf = io.BytesIO()
-            with ftplib.FTP() as ftp:
-                ftp.connect(data["host"], int(data["ftp_port"]), timeout=15)
-                ftp.login()
-                ftp.retrbinary(f"RETR {cover_path}", buf.write)
-            return buf.getvalue()
+
         try:
-            img_bytes = await request.app["hass"].async_add_executor_job(_fetch_cover)
+            img_bytes = await request.app["hass"].async_add_executor_job(
+                _read_or_fetch_cover,
+                data["host"],
+                int(data["ftp_port"]),
+                tid,
+                cover_path,
+            )
             return web.Response(
                 body=img_bytes,
                 content_type="image/png",
                 headers={"Cache-Control": "max-age=86400"},
             )
         except Exception as err:
-            _LOGGER.debug("Cover FTP fetch failed for %s: %s", tid, err)
+            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
             return web.Response(text=f"Cover not found: {err}", status=404)
 
 
@@ -945,4 +994,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         _ensure_domain_root(hass).pop(entry.entry_id, None)
     return unload_ok
-

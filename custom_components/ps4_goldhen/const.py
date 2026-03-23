@@ -20,6 +20,7 @@ DEFAULT_KLOG_PORT       = 3232
 PS4_CONFIG_DIR    = "/config/ps4"
 PAYLOAD_DIR       = f"{PS4_CONFIG_DIR}/payloads"
 DB_CACHE_DIR      = f"{PS4_CONFIG_DIR}/db"
+COVER_CACHE_DIR   = f"{PS4_CONFIG_DIR}/covers"
 
 TCP_PROBE_TIMEOUT = 3.0
 PLATFORMS: list[str] = ["sensor", "button"]
