@@ -16,7 +16,11 @@ DEFAULT_FTP_PORT        = 2121
 DEFAULT_RPI_PORT        = 12800
 DEFAULT_KLOG_PORT       = 3232
 
-PAYLOAD_DIR       = "/config/ps4_payloads"
+# — Directory layout (/config/ps4/) —————————————————————————————————————————
+PS4_CONFIG_DIR    = "/config/ps4"
+PAYLOAD_DIR       = f"{PS4_CONFIG_DIR}/payloads"
+DB_CACHE_DIR      = f"{PS4_CONFIG_DIR}/db"
+
 TCP_PROBE_TIMEOUT = 3.0
 PLATFORMS: list[str] = ["sensor", "button"]
 
@@ -45,5 +49,5 @@ EVENT_KLOG_LINE = "ps4_goldhen_klog_event"
 HOME_SCREEN     = "PlayStation Home Screen"
 
 APP_DB_REMOTE        = "/system_data/priv/mms/app.db"
-APP_DB_LOCAL         = "ps4_app.db"
+APP_DB_LOCAL         = f"{DB_CACHE_DIR}/app.db"
 DB_REFRESH_INTERVAL  = 300
