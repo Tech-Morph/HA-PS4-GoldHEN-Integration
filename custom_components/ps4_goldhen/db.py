@@ -1,4 +1,4 @@
-"""PS4 app.db downloader and game map builder."""
+"""PS4 app.db downloader, cache manager, and game map builder."""
 from __future__ import annotations
 
 import contextlib
@@ -8,11 +8,17 @@ import logging
 import os
 import sqlite3
 import tempfile
+from pathlib import Path
 from typing import Any
 
-from .const import APP_DB_REMOTE, DEFAULT_FTP_PORT
+from .const import APP_DB_REMOTE, APP_DB_LOCAL, DB_CACHE_DIR, DEFAULT_FTP_PORT
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _ensure_db_dir() -> None:
+    """Create /config/ps4/db/ if it doesn't exist."""
+    Path(DB_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def _list_appbrowse_tables(conn: sqlite3.Connection) -> list[str]:
@@ -82,10 +88,10 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                     )
                     continue
 
-                tid_col      = cols["titleid"]
-                name_col     = cols["titlename"]
-                cdn_cover_col = cols.get("thumbnailurl")   # Sony CDN URL
-                vis_col      = cols.get("visible")
+                tid_col       = cols["titleid"]
+                name_col      = cols["titlename"]
+                cdn_cover_col = cols.get("thumbnailurl")
+                vis_col       = cols.get("visible")
 
                 select_cols = f'"{tid_col}", "{name_col}"'
                 if cdn_cover_col:
@@ -104,9 +110,9 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                 _LOGGER.debug("Table %s returned %d rows", table, len(rows))
 
                 for row in rows:
-                    tid  = str(row[0]).strip().upper() if row[0] else None
-                    tname = str(row[1]).strip()        if row[1] else None
-                    cdn  = (
+                    tid   = str(row[0]).strip().upper() if row[0] else None
+                    tname = str(row[1]).strip()         if row[1] else None
+                    cdn   = (
                         str(row[2]).strip()
                         if cdn_cover_col and len(row) > 2 and row[2]
                         else None
@@ -115,18 +121,16 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
                     if not tid or not tname:
                         continue
 
-                    # Discard values that aren't real CDN URLs
                     if cdn and not cdn.startswith("http"):
                         cdn = None
 
-                    # Always build the standard FTP icon path as fallback
                     ftp_cover = f"/user/appmeta/{tid}/icon0.png"
 
                     if tid not in game_map:
                         game_map[tid] = {
                             "name":      tname,
-                            "cover":     ftp_cover,   # FTP path — used by cover proxy
-                            "cdn_cover": cdn,          # CDN URL — used for redirect
+                            "cover":     ftp_cover,
+                            "cdn_cover": cdn,
                         }
 
         finally:
@@ -141,31 +145,102 @@ def _extract_game_map(db_bytes: bytes) -> dict[str, dict[str, Any]]:
     return game_map
 
 
+def load_cached(host: str) -> dict[str, dict[str, Any]] | None:
+    """
+    Load the cached app.db from /config/ps4/db/app.db if it exists.
+    Returns None if no cache is available.
+    """
+    cache_path = Path(APP_DB_LOCAL)
+    if not cache_path.exists():
+        _LOGGER.debug("No cached app.db found at %s", APP_DB_LOCAL)
+        return None
+    try:
+        db_bytes = cache_path.read_bytes()
+        _LOGGER.info(
+            "[ps4_goldhen] Loading app.db from cache: %s (%d bytes)",
+            APP_DB_LOCAL, len(db_bytes),
+        )
+        return _extract_game_map(db_bytes)
+    except Exception as err:
+        _LOGGER.warning("[ps4_goldhen] Failed to load cached app.db: %s", err)
+        return None
+
+
 def download_and_parse(host: str, port: int) -> dict[str, dict[str, Any]]:
     """
-    Blocking — FTP-download app.db from the PS4 and return the game map.
+    Blocking — FTP-download app.db from the PS4, cache it to
+    /config/ps4/db/app.db, and return the game map.
     Call via hass.async_add_executor_job().
+
+    Falls back to the cached copy if the PS4 is unreachable.
     """
-    _LOGGER.debug("Attempting app.db download from %s:%d", host, port)
+    _ensure_db_dir()
+    _LOGGER.info(
+        "[ps4_goldhen] Attempting app.db download from %s:%d via FTP", host, port
+    )
+
     buffer = io.BytesIO()
+    db_bytes: bytes | None = None
 
-    with ftplib.FTP() as ftp:
-        ftp.connect(host, port, timeout=20)
-        ftp.login()
+    try:
+        with ftplib.FTP() as ftp:
+            ftp.connect(host, port, timeout=20)
+            ftp.login()
 
-        for candidate in (APP_DB_REMOTE, APP_DB_REMOTE + ".bak"):
-            buffer.seek(0)
-            buffer.truncate()
-            try:
-                ftp.retrbinary(f"RETR {candidate}", buffer.write)
-                db_bytes = buffer.getvalue()
-                if db_bytes:
-                    _LOGGER.info(
-                        "Downloaded %s from PS4 (%d bytes)", candidate, len(db_bytes)
-                    )
-                    return _extract_game_map(db_bytes)
-            except ftplib.error_perm as err:
-                _LOGGER.debug("FTP RETR %s failed: %s", candidate, err)
-                continue
+            for candidate in (APP_DB_REMOTE, APP_DB_REMOTE + ".bak"):
+                buffer.seek(0)
+                buffer.truncate()
+                try:
+                    ftp.retrbinary(f"RETR {candidate}", buffer.write)
+                    db_bytes = buffer.getvalue()
+                    if db_bytes:
+                        _LOGGER.info(
+                            "[ps4_goldhen] Downloaded %s from PS4 (%d bytes)",
+                            candidate, len(db_bytes),
+                        )
+                        break
+                except ftplib.error_perm as err:
+                    _LOGGER.debug("FTP RETR %s failed: %s", candidate, err)
+                    continue
 
-    raise FileNotFoundError("Could not download app.db from PS4 FTP")
+    except ftplib.all_errors as err:
+        _LOGGER.warning(
+            "[ps4_goldhen] FTP connection to %s:%d failed: %s — "
+            "will attempt to use cached app.db",
+            host, port, err,
+        )
+    except Exception as err:
+        _LOGGER.error(
+            "[ps4_goldhen] Unexpected error downloading app.db from %s:%d: %s — "
+            "will attempt to use cached app.db",
+            host, port, err,
+        )
+
+    if db_bytes:
+        # Save fresh copy to /config/ps4/db/app.db
+        try:
+            cache_path = Path(APP_DB_LOCAL)
+            cache_path.write_bytes(db_bytes)
+            _LOGGER.info(
+                "[ps4_goldhen] app.db cached to %s", APP_DB_LOCAL
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "[ps4_goldhen] Could not write app.db cache to %s: %s",
+                APP_DB_LOCAL, err,
+            )
+        return _extract_game_map(db_bytes)
+
+    # FTP failed — fall back to cache
+    cached = load_cached(host)
+    if cached is not None:
+        _LOGGER.info(
+            "[ps4_goldhen] Using cached app.db — %d titles loaded", len(cached)
+        )
+        return cached
+
+    raise FileNotFoundError(
+        f"Could not download app.db from PS4 FTP ({host}:{port}) "
+        f"and no cached copy exists at {APP_DB_LOCAL}. "
+        f"Ensure GoldHEN FTP is enabled on your PS4 and it is reachable."
+    )
