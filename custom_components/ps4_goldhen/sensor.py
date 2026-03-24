@@ -1,6 +1,8 @@
 """PS4 GoldHEN sensors."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, UnitOfPower
@@ -13,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     CONF_PS4_HOST,
+    COVER_CACHE_DIR,
     SENSOR_CURRENT_GAME,
     SENSOR_CPU_TEMP,
     SENSOR_SOC_TEMP,
@@ -36,6 +39,20 @@ _REST_MODE_STATE   = "Rest Mode"
 _OFF_STATE         = "Off"
 
 _PI_STATE_SENSOR = "sensor.ps4_state_pi"
+
+
+def _cover_is_available(entry_id: str, tid: str, game_map: dict) -> bool:
+    """
+    Return True only if we can actually serve a cover image right now:
+      • A CDN URL is known, OR
+      • The icon0.png is already cached on disk at /config/ps4/covers/{TID}.png
+    Returning False causes HA to show the mdi:sony-playstation icon instead.
+    """
+    game_info = game_map.get(tid, {})
+    if game_info.get("cdn_cover", ""):
+        return True
+    cache_file = Path(COVER_CACHE_DIR) / f"{tid.upper()}.png"
+    return cache_file.exists()
 
 
 async def async_setup_entry(
@@ -81,7 +98,8 @@ class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
 class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "Current Game"
-    _attr_icon = "mdi:gamepad-variant"
+    # Shown whenever entity_picture returns None (no cover available yet)
+    _attr_icon = "mdi:sony-playstation"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
@@ -130,10 +148,25 @@ class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def entity_picture(self) -> str | None:
+        """
+        Only return a cover URL when we know it will resolve.
+        If entity_picture is None, HA shows the mdi:sony-playstation icon instead
+        of a broken image.
+        """
         data = self.coordinator.data or {}
         tid  = data.get(SENSOR_TITLE_ID)
         if not tid:
             return None
+
+        game_map = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry_id, {})
+            .get("game_map", {})
+        )
+
+        if not _cover_is_available(self._entry_id, tid, game_map):
+            return None
+
         return f"/api/ps4_goldhen/cover/{self._entry_id}/{tid}"
 
     @property
