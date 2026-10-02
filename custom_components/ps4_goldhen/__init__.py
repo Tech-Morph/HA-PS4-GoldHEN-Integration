@@ -57,12 +57,14 @@ from .const import (
     SENSOR_HW_MODEL,
     SENSOR_CONSOLE_ID,
     EVENT_KLOG_LINE,
+    EVENT_KLOG_STREAM,
     HOME_SCREEN,
     APP_DB_REMOTE,
     APP_DB_LOCAL,
     DB_REFRESH_INTERVAL,
 )
 from . import db as ps4_db
+from .ftp_telemetry import async_fetch_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ _PANEL_SIDEBAR_ICON   = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT   = "ps4-goldhen-panel"
 
 _JS_STATIC_URL            = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=1.0.0"
+_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=ftp-listing-repair-3"
 _LOGO_STATIC_URL          = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
@@ -305,7 +307,7 @@ class KlogStateMachine:
         self.last_reason       = "init"
         self.last_signal_line  = ""
         self.recent_lines: deque[str] = deque(maxlen=250)
-        self.klog_connected: bool = True
+        self.klog_connected: bool = False
         self._pending_launch: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -479,6 +481,7 @@ async def _klog_listener_task(
     _LOGGER.info("Starting klog listener for %s:%d", host, port)
 
     while True:
+        writer = None
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=10
@@ -488,6 +491,10 @@ async def _klog_listener_task(
             entry_data = hass.data[DOMAIN].get(entry_id)
             if entry_data:
                 entry_data["klog_state_machine"].klog_connected = True
+                entry_data["klog_data"]["klog_connected"] = True
+                coordinator.async_set_updated_data(
+                    {**(coordinator.data or {}), **entry_data["klog_data"]}
+                )
 
             text_buffer = ""
 
@@ -503,7 +510,7 @@ async def _klog_listener_task(
 
                 text_buffer += chunk.decode("utf-8", errors="replace")
                 lines        = text_buffer.split("\n")
-                text_buffer  = lines[-1]
+                text_buffer  = lines[-1][-65536:]
 
                 entry_data = hass.data[DOMAIN].get(entry_id)
                 if not entry_data:
@@ -512,6 +519,11 @@ async def _klog_listener_task(
                 changed = False
                 for line in lines[:-1]:
                     line = line.rstrip("\r")
+                    if line:
+                        hass.bus.async_fire(
+                            EVENT_KLOG_STREAM,
+                            {"entry_id": entry_id, "message": line[:8192]},
+                        )
                     if line and _parse_klog_line(hass, line, entry_data, entry_id):
                         changed = True
 
@@ -519,10 +531,6 @@ async def _klog_listener_task(
                     coordinator.async_set_updated_data(
                         {**(coordinator.data or {}), **entry_data["klog_data"]}
                     )
-
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
 
         except asyncio.CancelledError:
             _LOGGER.info("Klog listener task cancelled")
@@ -537,6 +545,12 @@ async def _klog_listener_task(
                 _LOGGER.warning(
                     "Klog connection error for %s:%d: %s", host, port, err
                 )
+
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
 
         entry_data = hass.data[DOMAIN].get(entry_id)
         if entry_data:
@@ -643,97 +657,28 @@ async def _poll_ftp_json(
     coordinator: DataUpdateCoordinator,
 ) -> dict[str, Any]:
     entry_data = _ensure_domain_root(hass).get(entry_id, {})
-    existing   = dict(entry_data.get("klog_data", {}))
-
-    reader = writer = None
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, ftp_port), timeout=TCP_PROBE_TIMEOUT
-        )
-
-        async def _readline() -> str:
-            return (await reader.readline()).decode(errors="ignore")
-
-        def _send(cmd: str) -> None:
-            writer.write((cmd + "\r\n").encode())
-
-        await _readline()  # banner
-
-        _send("USER anonymous")
-        await _readline()  # 230
-
-        _send("TYPE I")
-        await _readline()  # 200
-
-        _send("PASV")
-        pasv_line = await _readline()
-        start = pasv_line.find("(")
-        end   = pasv_line.find(")", start + 1)
-        if start == -1 or end == -1:
-            raise ValueError(f"PASV parse error: {pasv_line!r}")
-        nums      = pasv_line[start + 1 : end].split(",")
-        data_host = ".".join(nums[:4])
-        data_port = (int(nums[4]) << 8) + int(nums[5])
-
-        dreader, dwriter = await asyncio.wait_for(
-            asyncio.open_connection(data_host, data_port), timeout=TCP_PROBE_TIMEOUT
-        )
-
-        _send(f"RETR {_PS4STATE_JSON_PATH}")
-        await _readline()  # 150
-
-        chunks: list[bytes] = []
-        while True:
-            chunk = await dreader.read(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        dwriter.close()
-        with contextlib.suppress(Exception):
-            await dwriter.wait_closed()
-
-        await _readline()  # 226
-
-        body = b"".join(chunks).decode(errors="ignore").strip()
-        if body:
-            parsed = json.loads(body)
-            existing[SENSOR_CPU_TEMP]    = parsed.get("cpu_temp")
-            existing[SENSOR_SOC_TEMP]    = parsed.get("soc_temp")
-            existing[SENSOR_SOC_POWER]   = parsed.get("soc_power_w")
-            existing[SENSOR_CPU_POWER]   = parsed.get("cpu_power_w")
-            existing[SENSOR_GPU_POWER]   = parsed.get("gpu_power_w")
-            existing[SENSOR_TOTAL_POWER] = parsed.get("total_power_w")
-            existing[SENSOR_FAN_DUTY]    = parsed.get("fan_duty")
-            existing[SENSOR_FW_VERSION]  = parsed.get("fw_version")
-            existing[SENSOR_HW_MODEL]    = parsed.get("hw_model")
-            existing[SENSOR_CONSOLE_ID]  = parsed.get("console_id")
-
-        existing["ftp_reachable"] = True
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as err:
-        _LOGGER.debug("PS4StateJSON FTP poll failed (%s): %s", host, err)
-        existing["ftp_reachable"] = False
-    finally:
-        if writer is not None:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-    if entry_id in _ensure_domain_root(hass):
-        _ensure_domain_root(hass)[entry_id]["klog_data"].update(
-            {k: existing[k] for k in (
-                SENSOR_CPU_TEMP,    SENSOR_SOC_TEMP,
-                SENSOR_SOC_POWER,   SENSOR_CPU_POWER,
-                SENSOR_GPU_POWER,   SENSOR_TOTAL_POWER,
-                SENSOR_FAN_DUTY,    SENSOR_FW_VERSION,
-                SENSOR_HW_MODEL,    SENSOR_CONSOLE_ID,
-                "ftp_reachable",
-            ) if k in existing}
-        )
-
+    result = await async_fetch_telemetry(host, ftp_port, _PS4STATE_JSON_PATH)
+    # Re-read after awaiting so concurrent klog updates are not overwritten.
+    existing = dict(entry_data.get("klog_data", {}))
+    dynamic_keys = (
+        SENSOR_CPU_TEMP, SENSOR_SOC_TEMP, SENSOR_SOC_POWER,
+        SENSOR_CPU_POWER, SENSOR_GPU_POWER, SENSOR_TOTAL_POWER,
+        SENSOR_FAN_DUTY,
+    )
+    for key in dynamic_keys:
+        existing[key] = result.values.get(key) if result.values is not None else None
+    if result.values is not None:
+        for key in (SENSOR_FW_VERSION, SENSOR_HW_MODEL, SENSOR_CONSOLE_ID):
+            existing[key] = result.values.get(key)
+    existing["ftp_reachable"] = result.ftp_reachable
+    existing["telemetry_status"] = result.status
+    if result.status != "ok":
+        _LOGGER.debug("PS4 telemetry unavailable (%s): %s", host, result.status)
+    root = _ensure_domain_root(hass)
+    if root.get(entry_id) is entry_data:
+        entry_data.setdefault("klog_data", {}).update(existing)
     return existing
+
 
 
 # ── Config entry setup ─────────────────────────────────────────────────────────

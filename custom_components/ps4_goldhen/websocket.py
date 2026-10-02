@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import ftplib
 import io
-from datetime import datetime, timezone
 from typing import Any
 
 import voluptuous as vol
@@ -12,7 +11,8 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DOMAIN, DEFAULT_FTP_PORT
+from .const import DOMAIN, DEFAULT_FTP_PORT, EVENT_KLOG_STREAM
+from .ftp_listing import list_directory
 
 # FTP timeout for all operations (seconds)
 _FTP_TIMEOUT = 15
@@ -22,35 +22,12 @@ DEFAULT_KLOG_PORT = 3232
 
 
 def _ftp_list_dir(host: str, port: int, path: str) -> list[dict[str, Any]]:
-    """Blocking: list a directory via FTP. Returns list of entry dicts."""
-    entries: list[dict[str, Any]] = []
+    """Blocking: return a structured directory listing via FTP."""
     with ftplib.FTP() as ftp:
         ftp.connect(host, port, timeout=_FTP_TIMEOUT)
-        ftp.login()  # GoldHEN FTP is unauthenticated
-        ftp.cwd(path)
-        raw: list[str] = []
-        ftp.retrlines("LIST", raw.append)
-        for line in raw:
-            parts = line.split(None, 8)
-            if len(parts) < 9:
-                continue
-            name = parts[8]
-            if name in (".", ".."):
-                continue
-            is_dir = line.startswith("d")
-            size = 0 if is_dir else _safe_int(parts[4])
-            entries.append(
-                {
-                    "name": name,
-                    "path": path.rstrip("/") + "/" + name,
-                    "is_dir": is_dir,
-                    "size": size,
-                    "modified": " ".join(parts[5:8]),
-                    "permissions": parts[0],
-                }
-            )
-    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
-    return entries
+        ftp.login()
+        return list_directory(ftp, path)
+
 
 
 def _ftp_delete(host: str, port: int, path: str, is_dir: bool) -> None:
@@ -288,9 +265,8 @@ async def ws_put_text(
     {
         vol.Required("type"): "ps4_goldhen/klog_subscribe",
         vol.Required("entry_id"): str,
-        vol.Optional("port", default=DEFAULT_KLOG_PORT): vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=65535)
-        ),
+        # Accepted for older cached frontends; TCP port is entry-owned.
+        vol.Optional("port"): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
     }
 )
 @websocket_api.async_response
@@ -299,78 +275,44 @@ async def ws_klog_subscribe(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Subscribe to GoldHEN Klog TCP stream and forward lines to frontend."""
+    """Forward lines from the entry-owned klog listener to one UI subscriber."""
     entry_id = msg["entry_id"]
-    port = int(msg.get("port", DEFAULT_KLOG_PORT))
-
-    try:
-        host = hass.data[DOMAIN][entry_id]["host"]
-    except Exception:  # noqa: BLE001
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id)
+    if not entry_data:
         connection.send_error(msg["id"], "not_found", "Entry not found")
         return
 
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
-    except Exception as err:  # noqa: BLE001
-        connection.send_error(msg["id"], "connect_failed", f"Cannot connect to Klog at {host}:{port}: {err}")
-        return
-
-    async def _stream_task() -> None:
-        buf = b""
-        try:
-            while True:
-                chunk = await reader.read(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    raw, buf = buf.split(b"\n", 1)
-                    line = raw.decode("utf-8", errors="replace").rstrip("\r")
-                    connection.send_message(
-                        {
-                            "id": msg["id"],
-                            "type": "event",
-                            "event": {
-                                "line": line,
-                                "time": datetime.now(timezone.utc).isoformat(),
-                            },
-                        }
-                    )
-        except asyncio.CancelledError:
-            # normal on unsubscribe
-            pass
-        except Exception as err:  # noqa: BLE001
-            connection.send_message(
-                {
-                    "id": msg["id"],
-                    "type": "event",
-                    "event": {
-                        "line": f"[klog] stream error: {err}",
-                        "time": datetime.now(timezone.utc).isoformat(),
-                    },
-                }
-            )
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:  # noqa: BLE001
-                pass
-
-    task = hass.async_create_task(_stream_task())
-
     @callback
-    def _unsub() -> None:
-        task.cancel()
-        try:
-            writer.close()
-        except Exception:  # noqa: BLE001
-            pass
+    def _forward(event) -> None:
+        data = event.data
+        if data.get("entry_id") != entry_id:
+            return
+        line = data.get("message")
+        if not isinstance(line, str):
+            return
+        connection.send_message(
+            {
+                "id": msg["id"],
+                "type": "event",
+                "event": {
+                    "line": line,
+                    "time": event.time_fired.isoformat(),
+                },
+            }
+        )
 
-    # Register unsubscribe handler for this subscription id
-    connection.subscriptions[msg["id"]] = _unsub
-
-    connection.send_result(msg["id"], {"connected": True, "host": host, "port": port})
+    connection.subscriptions[msg["id"]] = hass.bus.async_listen(
+        EVENT_KLOG_STREAM, _forward
+    )
+    connection.send_result(
+        msg["id"],
+        {
+            "subscribed": True,
+            "klog_connected": bool(
+                entry_data.get("klog_data", {}).get("klog_connected", False)
+            ),
+        },
+    )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

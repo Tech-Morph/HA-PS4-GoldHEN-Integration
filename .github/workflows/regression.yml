@@ -1,0 +1,94 @@
+name: Regression tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check Python and JSON syntax
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+          for root in ("custom_components/ps4_goldhen", "tests"):
+              for path in Path(root).rglob("*.py"):
+                  ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          for path in Path("custom_components/ps4_goldhen").rglob("*.json"):
+              json.loads(path.read_text(encoding="utf-8"))
+          PY
+      - name: Run Python regression suites
+        run: |
+          python -B tests/test_ftp_telemetry.py
+          python -B tests/test_issue1_connection.py
+          python -B tests/test_klog_shared.py
+          python -B tests/test_websocket_ftp_runtime.py
+          python -B tests/test_ftp_listing.py
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Check JavaScript syntax
+        run: node --check custom_components/ps4_goldhen/frontend/ps4-goldhen-panel.js
+      - name: Check klog subscriptions
+        run: node tests/test_klog_frontend.cjs
+      - name: Check FTP rendering
+        run: node tests/test_ftp_listing_frontend.cjs
+
+  regression:
+    name: Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [python, frontend]
+    if: ${{ always() }}
+    steps:
+      - name: Require passing test jobs
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          printf 'Python result: %s\nFrontend result: %s\n' "$PYTHON_RESULT" "$FRONTEND_RESULT"
+          test "$PYTHON_RESULT" = "success"
+          test "$FRONTEND_RESULT" = "success"

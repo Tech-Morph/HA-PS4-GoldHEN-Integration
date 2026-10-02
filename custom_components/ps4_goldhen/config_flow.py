@@ -43,19 +43,22 @@ def _schema(
 
 
 async def _tcp_reachable(host: str, port: int, timeout: float = TCP_PROBE_TIMEOUT) -> bool:
-    """Return True if a TCP connection to host:port succeeds within timeout."""
+    """Bound the setup probe and socket cleanup; never swallow cancellation."""
+    writer = None
     try:
         _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
         )
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
         return True
-    except Exception:  # noqa: BLE001
+    except (OSError, TimeoutError, ValueError):
         return False
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=0.15)
+            except (OSError, TimeoutError):
+                pass
 
 
 class PS4GoldHENConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

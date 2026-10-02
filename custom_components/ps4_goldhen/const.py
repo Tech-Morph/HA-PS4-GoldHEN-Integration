@@ -47,6 +47,7 @@ SENSOR_HW_MODEL   = "hw_model"
 SENSOR_CONSOLE_ID = "console_id"
 
 EVENT_KLOG_LINE = "ps4_goldhen_klog_event"
+EVENT_KLOG_STREAM = "ps4_goldhen_klog_stream"
 HOME_SCREEN     = "PlayStation Home Screen"
 
 APP_DB_REMOTE        = "/system_data/priv/mms/app.db"

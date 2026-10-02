@@ -1,0 +1,18 @@
+const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),assert=require('node:assert/strict');
+process.env.TZ='America/Los_Angeles';
+let Panel;
+const env={HTMLElement:class{attachShadow(){this.shadowRoot={querySelector:()=>null};}},customElements:{define:(n,c)=>Panel=c}};
+vm.createContext(env);vm.runInContext(fs.readFileSync(path.join(__dirname,'../custom_components/ps4_goldhen/frontend/ps4-goldhen-panel.js'),'utf8'),env);
+const p=new Panel();
+assert.equal(p._escapeHtml('&<>"\''),'&amp;&lt;&gt;&quot;&#39;');
+const entry={modified_utc:'2026-09-29T06:51:51Z'};
+const expected=new Date(entry.modified_utc).toLocaleString(undefined,{timeZoneName:'short'});
+assert.equal(p._formatModified(entry),expected);
+assert.equal(p._formatModified({modified:'Sep 29 2026'}),'Sep 29 2026');
+assert.equal(p._formatModified({modified_utc:'invalid'}),'Unknown');
+p._ftpEntries=[{name:'<img src=x onerror=alert(1)>',path:'/x" onclick="bad',is_dir:false,size:null,modified_utc:entry.modified_utc}];
+const html=p._renderFtp();assert.ok(html.includes('&lt;img'));assert.ok(!html.includes('<img src=x'));assert.ok(html.includes('Unknown'));
+p._editing={name:'x',path:'/x',content:'</textarea><img src=x onerror=bad>'};
+assert.ok(!p._renderEditor().includes('</textarea><img'));
+console.log('PASS: UTC-to-browser-local rendering, LIST fallback, invalid dates, FTP/editor escaping, unknown size');
+console.log('Example local display:',expected);

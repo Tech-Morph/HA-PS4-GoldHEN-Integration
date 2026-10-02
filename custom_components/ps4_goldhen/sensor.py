@@ -94,6 +94,15 @@ class PS4FTPStatusSensor(CoordinatorEntity, SensorEntity):
         data = self.coordinator.data or {}
         return "online" if data.get("ftp_reachable") else "offline"
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose optional telemetry health independently of FTP status."""
+        return {
+            "telemetry_status": (self.coordinator.data or {}).get(
+                "telemetry_status", "not_polled"
+            )
+        }
+
 
 class PS4CurrentGameSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
