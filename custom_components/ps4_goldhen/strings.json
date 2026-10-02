@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to PS4 GoldHEN",
-        "description": "Enter the connection details for your PS4. GoldHEN must be running with BinLoader and FTP services active.",
+        "description": "Enter the connection details for your PS4. Enable GoldHEN FTP to connect. PS4StateJSON telemetry is optional; klog and BinLoader are used by their respective features.",
         "data": {
           "ps4_host": "PS4 IP Address",
           "binloader_port": "BinLoader Port",

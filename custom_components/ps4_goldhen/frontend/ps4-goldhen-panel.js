@@ -47,6 +47,8 @@ class PS4GoldHENPanel extends HTMLElement {
     this._klogLines = [];
     this._klogMaxLines = 800;
     this._klogUnsub = null; // unsubscribe fn returned by subscribeMessage
+    this._klogConnecting = false;
+    this._klogConnectGeneration = 0;
     this._klogManuallyDisconnected = false;
     this._klogRenderQueued = false;
 
@@ -434,66 +436,69 @@ class PS4GoldHENPanel extends HTMLElement {
     });
   }
 
-  // Klog
+  // Klog: subscribe to the single backend-owned PS4 TCP listener.
   async _klogConnect() {
+    if (!this.isConnected || this._tab !== "klog") return;
     if (!this._hass || !this._selectedEntryId) {
       alert("Select a PS4 first.");
       return;
     }
-
-    if (this._klogUnsub) return;
-
-    const portStr = (this.shadowRoot.querySelector("#klog-port")?.value || this._klogPort || "3232").trim();
-    const port = parseInt(portStr, 10) || 3232;
-    this._klogPort = String(port);
-
+    if (this._klogUnsub || this._klogConnecting) return;
     if (!this._hass.connection || typeof this._hass.connection.subscribeMessage !== "function") {
-      this._klogStatus = "Klog subscribeMessage not available in this HA frontend context.";
+      this._klogManuallyDisconnected = true;
+      this._klogStatus = "Klog subscribeMessage is unavailable in this HA frontend context.";
       this._render();
       return;
     }
 
-    this._klogStatus = `Connecting (port ${port})...`;
+    const entryId = this._selectedEntryId;
+    const generation = ++this._klogConnectGeneration;
+    this._klogConnecting = true;
+    this._klogStatus = "Subscribing to the backend Klog listener...";
     this._render();
 
     try {
-      this._klogUnsub = await this._hass.connection.subscribeMessage(
+      const unsub = await this._hass.connection.subscribeMessage(
         (m) => {
+          if (generation !== this._klogConnectGeneration || entryId !== this._selectedEntryId) return;
           const line = this._extractKlogLine(m);
           if (typeof line !== "string" || !line.length) return;
-
           this._klogLines.push(line);
           if (this._klogLines.length > this._klogMaxLines) {
             this._klogLines.splice(0, this._klogLines.length - this._klogMaxLines);
           }
-
           this._scheduleKlogRender();
         },
-        {
-          type: "ps4_goldhen/klog_subscribe",
-          entry_id: this._selectedEntryId,
-          port: port,
-        }
+        { type: "ps4_goldhen/klog_subscribe", entry_id: entryId }
       );
-
+      if (generation !== this._klogConnectGeneration || entryId !== this._selectedEntryId) {
+        unsub();
+        return;
+      }
+      this._klogUnsub = unsub;
       this._klogManuallyDisconnected = false;
-      this._klogStatus = `Connected (port ${port}).`;
+      this._klogStatus = "Subscribed. The backend owns the PS4 Klog connection.";
     } catch (e) {
-      this._klogStatus = `Connect failed: ${e.message || e}`;
-      this._klogUnsub = null;
+      if (generation === this._klogConnectGeneration) {
+        this._klogManuallyDisconnected = true;
+        this._klogStatus = `Subscribe failed: ${e.message || e}`;
+        this._klogUnsub = null;
+      }
+    } finally {
+      if (generation === this._klogConnectGeneration) {
+        this._klogConnecting = false;
+        this._render();
+      }
     }
-
-    this._render();
   }
 
   _klogDisconnect(markManual = true) {
+    ++this._klogConnectGeneration;
+    this._klogConnecting = false;
     if (this._klogUnsub) {
-      try {
-        this._klogUnsub();
-      } catch (_) {}
+      try { this._klogUnsub(); } catch (_) {}
     }
     this._klogUnsub = null;
-
     if (markManual) this._klogManuallyDisconnected = true;
     this._klogStatus = "Disconnected.";
     this._render();
@@ -601,6 +606,7 @@ class PS4GoldHENPanel extends HTMLElement {
         this._klogManuallyDisconnected = false;
 
         this._selectedEntryId = sel.value;
+        this._klogLines = [];
         this._editing = null;
         this._path = "/";
         this._ftpEntries = [];
@@ -700,8 +706,10 @@ class PS4GoldHENPanel extends HTMLElement {
         box.scrollTop = box.scrollHeight;
       }
 
-      if (!this._klogUnsub && !this._klogManuallyDisconnected && this._selectedEntryId) {
-        setTimeout(() => this._klogConnect(), 0);
+      if (!this._klogUnsub && !this._klogConnecting && !this._klogManuallyDisconnected && this._selectedEntryId) {
+        setTimeout(() => {
+          if (this.isConnected && this._tab === "klog") this._klogConnect();
+        }, 0);
       }
     }
 
@@ -713,10 +721,23 @@ class PS4GoldHENPanel extends HTMLElement {
     }
   }
 
+  _escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  _formatModified(entry) {
+    if (!entry.modified_utc) return entry.modified || "Unknown";
+    const date = new Date(entry.modified_utc);
+    if (Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleString(undefined, {timeZoneName: "short"});
+  }
+
   _renderFtp() {
     return html`
       <div class="header">
-        <div class="path">PS4 FTP: ${this._path}</div>
+        <div class="path">PS4 FTP: ${this._escapeHtml(this._path)}</div>
         <div class="nav-btns">
           <button id="btn-root">Root</button>
           <button id="btn-back">Back</button>
@@ -737,17 +758,17 @@ class PS4GoldHENPanel extends HTMLElement {
           ${this._ftpEntries.map(e => `
             <tr>
               <td>
-                <span class="${e.is_dir ? "folder" : "file"}" data-path="${e.path}" data-isdir="${e.is_dir}">
-                  ${e.is_dir ? "📁" : "📄"} ${e.name}
+                <span class="${e.is_dir ? "folder" : "file"}" data-path="${this._escapeHtml(e.path)}" data-isdir="${e.is_dir}">
+                  ${e.is_dir ? "📁" : "📄"} ${this._escapeHtml(e.name)}
                 </span>
               </td>
-              <td>${e.is_dir ? "-" : (e.size / 1024 / 1024).toFixed(2) + " MB"}</td>
-              <td>${e.modified}</td>
+              <td>${e.is_dir ? "-" : (typeof e.size === "number" ? (e.size / 1024 / 1024).toFixed(2) + " MB" : "Unknown")}</td>
+              <td title="${this._escapeHtml(e.modified_utc || 'LIST date; timezone unspecified')}">${this._escapeHtml(this._formatModified(e))}</td>
               <td class="actions">
-                ${!e.is_dir ? `<button data-action="download" data-path="${e.path}" data-name="${e.name}">💾</button>` : ""}
-                ${!e.is_dir ? `<button data-action="edit" data-path="${e.path}" data-name="${e.name}">✏️</button>` : ""}
-                <button data-action="rename" data-path="${e.path}" data-name="${e.name}">🏷️</button>
-                <button data-action="delete" data-path="${e.path}" data-isdir="${e.is_dir}" data-name="${e.name}">🗑️</button>
+                ${!e.is_dir ? `<button data-action="download" data-path="${this._escapeHtml(e.path)}" data-name="${this._escapeHtml(e.name)}">💾</button>` : ""}
+                ${!e.is_dir ? `<button data-action="edit" data-path="${this._escapeHtml(e.path)}" data-name="${this._escapeHtml(e.name)}">✏️</button>` : ""}
+                <button data-action="rename" data-path="${this._escapeHtml(e.path)}" data-name="${this._escapeHtml(e.name)}">🏷️</button>
+                <button data-action="delete" data-path="${this._escapeHtml(e.path)}" data-isdir="${e.is_dir}" data-name="${this._escapeHtml(e.name)}">🗑️</button>
               </td>
             </tr>
           `).join("")}
@@ -816,16 +837,16 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _renderKlog() {
     const connected = !!this._klogUnsub;
+    const connecting = this._klogConnecting;
     return html`
       <div class="card">
         <h3>Live Klog</h3>
         <div class="row">
-          <input id="klog-port" type="number" value="${this._klogPort}" style="width:160px;">
-          <button class="btn" id="btn-klog-connect" ${connected ? "disabled" : ""}>Connect</button>
-          <button class="btn" id="btn-klog-disconnect" ${connected ? "" : "disabled"}>Disconnect</button>
+          <button class="btn" id="btn-klog-connect" ${(connected || connecting) ? "disabled" : ""}>Connect</button>
+          <button class="btn" id="btn-klog-disconnect" ${(connected || connecting) ? "" : "disabled"}>Disconnect</button>
           <button class="btn" id="btn-klog-clear">Clear</button>
         </div>
-        <div class="muted">${this._klogStatus || "Waiting... (default port 3232)"}</div>
+        <div class="muted">${this._klogStatus || "Waiting for a backend subscription..."}</div>
         <pre class="klog" id="klog-box"></pre>
       </div>
     `;
@@ -884,10 +905,10 @@ class PS4GoldHENPanel extends HTMLElement {
       <div class="editor-overlay">
         <div class="editor-container">
           <div style="margin-bottom:10px">
-            <strong>Editing: ${this._editing.name}</strong><br>
-            <small class="muted">${this._editing.path}</small>
+            <strong>Editing: ${this._escapeHtml(this._editing.name)}</strong><br>
+            <small class="muted">${this._escapeHtml(this._editing.path)}</small>
           </div>
-          <textarea id="editor-textarea" spellcheck="false">${this._editing.content}</textarea>
+          <textarea id="editor-textarea" spellcheck="false">${this._escapeHtml(this._editing.content)}</textarea>
           <div class="editor-actions">
             <button id="btn-cancel">Cancel</button>
             <button id="btn-save" class="btn-save">Save to PS4</button>

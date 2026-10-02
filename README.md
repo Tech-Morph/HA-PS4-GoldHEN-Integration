@@ -1,342 +1,176 @@
 # PS4 GoldHEN — Home Assistant Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-![version](https://img.shields.io/badge/version-1.0.0-blue)
-![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
-![license](https://img.shields.io/github/license/Tech-Morph/HA-PS4-GoldHEN-Integration)
-[![Ko-fi](https://img.shields.io/badge/Support%20Me-Ko--fi-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/techmorph)
+<!-- ps4state-not-working -->
+> [!WARNING]
+> `PS4StateJSON.prx` (the PS4State plugin) is under active development and is **not** currently in working order. Do not install or enable it.
+>
+> The Home Assistant integration works independently of this plugin. Temperature, power, fan, and hardware telemetry should remain unknown without a working, validated producer. The connection repair does not fix or validate this PRX, its firmware compatibility, fan control, audio, or game-saving behavior.
+<!-- /ps4state-not-working -->
 
-A fully local Home Assistant integration and sidebar panel for managing a **PS4 running GoldHEN** network services — no cloud, no polling services, no extra dependencies.
+A Home Assistant custom integration and sidebar panel for a PS4 running GoldHEN network services. FTP and klog provide the base features; native PS4StateJSON telemetry is optional and under separate repair.
 
-[![Add to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Tech-Morph&repository=HA-PS4-GoldHEN-Integration&category=integration)
+[Add this repository to HACS](https://my.home-assistant.io/redirect/hacs_repository/?owner=Tech-Morph&repository=HA-PS4-GoldHEN-Integration&category=integration)
 
----
+## Repair status
 
-## ✨ Features
+The connection, klog, and FTP-listing repairs described here are development work, not a claim that published releases already contain them. Check the installed files/revision before following repair-specific instructions. The component manifest currently declares version `0.9.0`; there is no separate `1.0.0` release claim in this documentation.
 
-### 🎮 Sensors
+Current evidence as of October 2, 2026:
 
-| Entity | Description |
-|---|---|
-| **Current Game** | Resolved game title from the PS4's `app.db` (e.g. `God of War`) — falls back to Title ID if DB hasn't loaded yet. State reflects `Rest Mode`, `Off`, or `PlayStation Home Screen` automatically. |
-| **FTP Status** | `online` / `offline` based on polling the PS4 FTP port every 3 seconds. |
-| **CPU Temperature** | Real-time CPU die temp polled from `ps4_state.json` via FTP every 3 seconds (°C). Requires the PS4StateJSON PRX plugin — see below. |
-| **SoC Temperature** | Real-time SoC board temp polled from `ps4_state.json` via FTP every 3 seconds (°C). Requires the PS4StateJSON PRX plugin — see below. |
-| **SoC Power** | SoC power draw in watts (e.g. `13.2`), polled from `ps4_state.json`. |
-| **CPU Power** | CPU power draw in watts, polled from `ps4_state.json`. |
-| **GPU Power** | GPU power draw in watts, polled from `ps4_state.json`. |
-| **Total Power** | Total system power draw in watts, polled from `ps4_state.json`. |
-| **Fan Duty** | Current fan speed as a percentage (0–100%), polled from `ps4_state.json`. |
-| **Firmware Version** | PS4 firmware version string (e.g. `11.00`). Diagnostic entity, resolved once at plugin load. |
-| **Hardware Model** | PS4 hardware model (e.g. `CUH-1001A`). Diagnostic entity, auto-detected or set via conf file. |
-| **Console ID** | PS4 IDPS as a 32-character hex string. Diagnostic entity, resolved once at plugin load. |
+- 56 Python tests and the frontend syntax/assertion checks passed on the development host.
+- A controlled local FTP server reproduces the old setup hang when `RETR` returns `550` but the passive socket stays idle; the repaired transport returns a result instead of waiting indefinitely.
+- Owner-reported checks on firmware 11.00: installed transport/sensor hashes matched; FTP, klog, and payload functionality worked; offline HA startup and recovery passed. A separate Pi probe authenticated FTP and returned a bounded `ftp_550`. This does not establish successful telemetry retrieval, native measurements, or firmware 9.00 compatibility.
+- Issue #1 reported firmware 9.00 and Home Assistant 2026.8. Reporter validation of the repair remains pending.
+- Native sensor APIs, fan control, PRX firmware compatibility, audio, game saving, and frozen legacy telemetry detection are not validated by the connection repair.
 
-> **Note:** Temperature, power, fan, and hardware sensors will show `unknown` until `ps4_state.json` is successfully fetched. They update every 3 seconds while the PS4 is on and the PRX is loaded.
+See [development reference](docs/PROJECT.md) and [development changelog](docs/CHANGELOG.md).
 
----
+## Requirements and compatibility
 
-#### PS4StateJSON PRX Setup
+To add the integration, GoldHEN must be running and its configured FTP TCP port must be reachable. The setup flow does not ask for a PSN/Second Screen pairing code, inspect a firmware version string, or probe BinLoader.
 
-To enable temperature, power, fan, and hardware sensors, install the **PS4StateJSON** PRX as a GoldHEN plugin. Telemetry is written to a JSON file on the PS4 filesystem every 3 seconds and polled by HA over FTP — no klog dependency for sensor data.
-
-**Build from source:**
-
-```bash
-cd ~/ps4_tools/PS4StateJSON && make && \
-  curl -T PS4StateJSON.prx ftp://<PS4_IP>:2121/data/GoldHEN/plugins/PS4StateJSON.prx --user anonymous:
-```
-
-**Install:**
-
-1. Copy `PS4StateJSON.prx` to `/data/GoldHEN/plugins/` on your PS4 (via FTP).
-2. Create or edit `/data/GoldHEN/plugins/plugin.ini` to include:
-
-```ini
-[default]
-/data/GoldHEN/plugins/PS4StateJSON.prx
-```
-
-3. Cold boot the PS4. The PRX starts a background thread that writes telemetry to `/data/GoldHEN/ps4_state.json` every 3 seconds:
-
-```json
-{
-  "cpu_temp": 63,
-  "soc_temp": 61,
-  "soc_power_w": 13.71,
-  "cpu_power_w": 11.92,
-  "gpu_power_w": 20.87,
-  "total_power_w": 46.50,
-  "fan_duty": 54,
-  "fw_version": "11.00",
-  "hw_model": "CUH-1001A",
-  "console_id": "00000001018400100C00000000000000"
-}
-```
-
-HA polls this file via FTP every **3 seconds** and merges the values into the coordinator — no klog dependency for telemetry.
-
-**Optional — set exact hardware model:**
-
-If you want to override the auto-detected model series with the exact CUH number from the label on the back of your console, create `/data/GoldHEN/ps4_state.conf` on the PS4:
-
-```
-hw_model=CUH-1215A
-```
-
-This is read once at plugin load. Without it, the model is auto-derived from the Neo flag and firmware version.
-
----
-
-#### Fan Curve
-
-The PRX manages the PS4 fan automatically via syscall 532 based on the highest of CPU or SoC temperature, overriding GoldHEN's default fan management:
-
-| Die Temp | Duty Byte | Fan Speed |
+| Feature | Required PS4 capability | Default port |
 |---|---|---|
-| < 60°C | `0x66` | ~40% |
-| 60–65°C | `0x80` | ~50% |
-| 65–72°C | `0x8C` | ~55% |
-| 72–76°C | `0x9E` | ~62% |
-| 76–80°C | `0xAD` | ~68% |
-| 80–85°C | `0xBF` | ~75% |
-| 85–90°C | `0xD9` | ~85% |
-| > 90°C | `0xFF` | 100% |
+| Initial connection, FTP browser, local app database download | GoldHEN FTP with anonymous login | `2121` |
+| Game-state parsing and live logs | GoldHEN klog/debug log server | `3232` |
+| Explicit payload sending | GoldHEN BinLoader and a separately validated payload | `9090` |
+| Temperature/power/fan/hardware data | Validated producer exporting the legacy JSON contract through FTP | FTP port |
 
-Duty is only updated on change. On plugin unload, fan control is returned to firmware (`sc532_duty(0)`). The ICC thermal threshold is also set to 65°C at load via `/dev/icc_fan`.
+PS4StateJSON, fan-control plugins, and BinLoader are not prerequisites for initial setup. Enable each optional service only for the feature you need.
 
-> **Note:** The duty percentage shown in the `Fan Duty` sensor reflects the PWM duty cycle (`duty * 100 / 255`), not the physical RPM percentage. The PS4 fan is non-linear — actual audible speed will feel higher than the reported percentage, especially on first-generation hardware (CUH-1001A/1115A).
+The network transport has no firmware-offset table. Protocol-based connection behavior is separate from native plugin/payload compatibility; there is no all-firmware certification. No minimum Home Assistant version is certified by this repair. Earlier repairs were observed on the owner's HA 2026.9.4 installation; test the latest patch on your actual HA installation before declaring it supported.
 
----
+An optional external `sensor.ps4_state_pi` reporting `on`, `rest`, or `offline` improves power-state classification. Without it, do not assume reliable powered-off versus Rest Mode classification from klog alone. See [PS4 State Monitor](https://github.com/Tech-Morph/PS4-State-Monitor).
 
-#### Current Game — Extra Attributes
+## Installation and configuration
 
-| Attribute | Value |
+### HACS
+
+1. Add `Tech-Morph/HA-PS4-GoldHEN-Integration` as an Integration custom repository.
+2. Download PS4 GoldHEN and restart Home Assistant.
+3. Open Settings → Devices & Services → Add Integration → PS4 GoldHEN.
+4. Enter the PS4 host, FTP port, and BinLoader port.
+
+A HACS download/update is not a way to obtain unpublished workbench patches. It may overwrite manually installed test code.
+
+### Manual installation
+
+Copy `custom_components/ps4_goldhen` from the intended revision into your HA configuration's `custom_components` directory, preserving a backup of existing code. Restart Home Assistant, then add the integration through the UI. For HA OS, manage Core from its Terminal & SSH app; do not substitute commands intended for the separate development host.
+
+| UI field | Default | Used for |
+|---|---|---|
+| PS4 IP Address | Enter your LAN address | Console connection |
+| FTP Port | `2121` | Setup TCP check and FTP operations |
+| BinLoader Port | `9090` | Explicit payload sending; not probed during setup |
+
+Klog and RPI ports are not exposed by the current setup/options form. The backend defaults are klog `3232` and RPI `12800`; RPI denotes Remote Package Installer, not a Raspberry Pi REST sensor. PKG installation is not implemented.
+
+Multiple entries may be added, but multi-console behavior is not fully isolated: app.db/cover caches are shared, and payload/button targeting has known limitations. Changing a host can also affect host-based entity identity.
+
+## Features and limits
+
+### Sidebar panel
+
+The current panel has three tabs: FTP, Payloads, and Klog. There is no separate Game Library or Dashboard tab.
+
+- FTP: browse directories, download/upload files, rename, delete, and edit text. Delete handles files or empty directories, not recursive directory deletion. Large file/text operations are not fully streaming or strictly size-bounded.
+- Payloads: list `.bin`/`.elf` files from HA's `/config/ps4/payloads` and explicitly send them to BinLoader. A transfer success message confirms bytes sent, not execution or firmware compatibility.
+- Klog: subscribe to the integration's raw log events. The repaired backend owns one PS4 klog connection per entry; opening more HA panel subscriptions does not create extra PS4 sockets. Leaving the tab removes the UI subscription, not the backend listener. No history replay is implemented; the panel keeps up to 800 received lines locally.
+
+Close external klog consumers when testing the HA backend. A panel subscription label alone does not prove that the PS4 TCP connection is live; received lines are the evidence.
+
+### FTP dates and game metadata
+
+Directory listing prefers MLSD facts. Explicit MLSD modification timestamps are interpreted as UTC and displayed in the browser's local timezone. LIST fallback is used only when MLSD is explicitly unsupported; its ambiguous date strings are preserved without invented years or timezones. Differences between the server's LIST and MLSD years are not corrected cosmetically.
+
+The integration downloads `/system_data/priv/mms/app.db` at background-task startup and then every 300 seconds, after each refresh attempt completes. It resolves names locally and falls back to title IDs while metadata is unavailable. There is no Game Library UI. The included `title_resolver.py` is not wired into this active path.
+
+The active title-name path uses the local database. Known cover URLs from that database can redirect the browser to an external CDN; do not describe all cover rendering as cloud-free. Without a known CDN cover or cached icon, the current-game sensor uses the PlayStation icon fallback.
+
+### Sensor contract
+
+| Entity group | Source and limitations |
 |---|---|
-| `title_id` | Raw PS4 Title ID (e.g. `CUSA12345`) |
-| `game_name` | Resolved name from `app.db` |
-| `game_cover` | Cover art URL from `app.db` |
-| `state_classification` | `game` / `home_screen` / `rest` / `off` |
-| `pi_state` | Raw state from your Pi REST sensor |
-| `klog_connected` | Whether the klog stream is live |
-| `state_reason` | Which klog signal last triggered a state change |
-| `pending_title_id` | Title ID seen in launch signal, not yet confirmed |
-| `state_signal_line` | The raw klog line that caused the last state change |
+| Current Game | Klog state machine with app.db name lookup; Rest/Off overrides depend on the external Pi-state entity |
+| FTP Status | `online` after successful FTP authentication, independently of optional telemetry; includes `telemetry_status` |
+| CPU/SoC Temperature | Optional legacy `cpu_temp`/`soc_temp`, displayed as °C; physical labels/scaling need producer validation |
+| SoC/CPU/GPU/Total Power | Optional legacy watt keys; rail layout and total aggregation are not calibrated system-meter measurements |
+| Fan Duty | Optional percentage supplied by the producer; not RPM or proof of measured physical fan speed |
+| Firmware/Hardware/Console ID | Optional diagnostic strings from the producer; not independently measured by HA |
 
----
+Numeric bounds are defensive parser checks, not calibration. Failed/invalid telemetry reads clear dynamic measurements to unknown; static diagnostic values may remain cached. A successful read of a frozen legacy file can still show old values: freshness expiry is not implemented. Avoid publishing console identifiers from diagnostic output.
 
-### 🗂️ Sidebar Panel (GoldHEN Dashboard)
+## Optional telemetry and plugin configuration
 
-A full web-component panel added to your HA sidebar with four tabs:
+HA polls `/data/GoldHEN/ps4_state.json` on a nominal five-second coordinator interval. Producer publication frequency is a separate property and is not changed by this patch.
 
-#### FTP Browser
-- Browse the full PS4 filesystem
-- Upload files from your PC/phone directly to the PS4
-- Download files from the PS4 to your browser
-- Delete files and folders
-- Rename and move files
-- Edit small text files in-browser (read/write)
+The transport validates the FTP greeting, anonymous login, binary mode, passive response, transfer acceptance, and completion. Defaults are one second per bounded operation, a four-second transfer deadline, up to 0.15 seconds of close waiting per socket after transfer/cancellation, and a 65,536-byte telemetry limit. External cancellation propagates. The setup TCP probe has a separate three-second connect timeout and bounded cleanup. These limits do not apply to every FTP browser/database/payload operation.
 
-#### BinLoader
-- Lists all `.bin` / `.elf` payloads from `/config/ps4_payloads/`
-- Send any payload over raw TCP to the PS4 BinLoader port with one click
-- Bundled payloads are automatically copied to `/config/ps4_payloads/` on first run
+| `telemetry_status` | Meaning |
+|---|---|
+| `ok` | A recognized JSON object was fetched and parsed; not proof of valid/fresh measurements |
+| `ftp_550` | Server rejected a request with FTP 550; with authenticated FTP, this does not block the base integration |
+| `invalid_json` | Retrieved data could not satisfy the parser contract |
+| `timeout` | A bounded transport operation/deadline expired; check `ftp_reachable` separately |
+| `connection_error` | An I/O/connection failure; check `ftp_reachable` separately |
+| `protocol_error` | Malformed protocol data, size-limit violation, or another transport validation failure |
+| Other `ftp_<code>` | An FTP response was rejected at the relevant protocol step |
 
-#### Klog Viewer
-- Live streaming PS4 kernel/app log output in the panel
-- Auto-connects when you open the tab
-- Disconnects cleanly on tab switch or panel close
-- Backend holds the klog connection — the UI subscribes via HA WebSocket so you never lose logs while the panel is closed
+`ftp_550` does not prove the file is absent. Missing files, access restrictions, or other server-side rejection reasons need separate evidence. Do not delete or rename an existing telemetry file to manufacture a test case.
 
-#### Game Library (app.db)
-- Automatically downloads `app.db` from the PS4 over FTP on startup
-- Parses all installed titles and icons, populating the `Current Game` sensor with real names
-- Refreshes on a configurable interval (default: 1 hour)
+The correct GoldHEN configuration path is `/data/GoldHEN/plugins.ini`; plugin binaries may reside in `/data/GoldHEN/plugins/`. Preserve unrelated title sections/rules. Initial HA setup does not require editing that file. Editing a rule does not prove an already loaded plugin has unloaded.
 
----
+Historical PS4StateJSON builds include fan and privilege-related behavior under investigation. Do not enable or distribute an old binary as a workaround for an HA setup timeout. A title-loaded PRX is not evidence of continuous home-screen sampling. Native producer deployment, API validation, and audio/save testing remain a separate project.
 
-### ⚙️ Service
+## Payload service and buttons
 
-`ps4_goldhen.send_payload` — Send any payload file to the PS4 BinLoader port.
+The registered payload service is `ps4_goldhen.send_payload`. Use a payload whose source, checksum, firmware target, and behavior you have independently reviewed. Nothing is sent automatically by the connection repair.
+
+Example of the service shape only; `your-reviewed-payload.bin` is not a supplied file:
 
 ```yaml
-service: ps4_goldhen.send_payload
+action: ps4_goldhen.send_payload
 data:
-  payload_file: GoldHEN.bin      # filename inside /config/ps4_payloads/ or absolute path
-  ps4_host: 192.168.1.100        # optional override
-  binloader_port: 9090           # optional override
-  timeout: 30                    # optional, seconds
+  payload_file: your-reviewed-payload.bin
+  ps4_host: 192.168.1.100
+  binloader_port: 9090
+  timeout: 30
 ```
 
----
+A bare filename is resolved under `/config/ps4/payloads`; the legacy implementation also accepts absolute paths and has no complete safe-root policy. In multi-console setups, provide both host and BinLoader port explicitly rather than trusting the global default. The timeout bounds TCP connect/drain operations, not the complete file-read/transfer/close lifetime.
 
-## 📋 Requirements
+Bundled resources are copied to HA's payload directory during integration setup if a destination filename is absent. Existing files are not overwritten and no payload is executed merely by copying. The connection repair does not certify the bundled binaries; see [payload inventory](custom_components/ps4_goldhen/bundled_payloads/README.md).
 
-- **PS4** on your LAN running **GoldHEN** with network services enabled
-- **Home Assistant** 2024.1 or newer
-- **HACS** installed in Home Assistant
-- GoldHEN services enabled:
-  - FTP (default port `2121`)
-  - BinLoader (default port `9090`)
-  - Klog / Debug Log Server (default port `3232`)
-- *(Optional)* A Raspberry Pi or other device running a REST sensor at `sensor.ps4_state_pi` reporting `on` / `rest` / `offline` for accurate power state detection — see [PS4 State Monitor](https://github.com/Tech-Morph/PS4-State-Monitor)
-- *(Optional)* `PS4StateJSON.prx` GoldHEN plugin for temperature, fan, power, and hardware sensors — see [PS4StateJSON PRX Setup](#ps4statejson-prx-setup)
+Restart and Standby buttons reference `restart.bin` and `standby.bin`, which are not bundled. Their service calls also lack an explicit console target. Do not describe them as working, validated power controls. `ps4_goldhen.install_pkg` is not registered/implemented; RPI/etaHEN/PS5 installation is not a supported feature.
 
----
+## Troubleshooting and validation
 
-## 🚀 Installation
+- Setup cancelled while fetching telemetry: confirm that the installed revision contains the bounded helper. Do not change firmware, send a payload, or install a PRX to fix the HA transport.
+- FTP Status online with `ftp_550`: FTP authenticated, but the request was rejected. Unknown dynamic telemetry is expected; inspect the actual server response before diagnosing producer state.
+- Connection error with FTP offline: check the actual IP, enabled GoldHEN FTP service, and configured port; obtain the underlying connection/banner/login exception before changing code.
+- Current Game shows a title ID: metadata may not have loaded. Check app.db logs and the five-minute background refresh; the shared cache is not per-console isolation.
+- Klog subscribed but no lines: verify received output, backend connection logs, and competing external clients. UI subscription is not a TCP connectivity test.
+- Wrong-looking FTP year: compare explicit MLSD facts with LIST. Do not rewrite server-provided years to the current year.
+- Unknown temperature/power/fan data: the optional producer may be unavailable, invalid, or unvalidated. Key counts and common version strings do not establish binary identity.
 
-### Method 1 — HACS (Recommended)
+For public reports, include HA version, integration revision/file hashes, firmware, exact GoldHEN build, telemetry status, and relevant logs with identifiers/credentials redacted. Do not expose FTP/BinLoader/klog externally. The current integration is not fully security-hardened: authorization policy, large transfers, cache isolation, cover routes, and payload path validation remain review items.
 
-1. Click the button below to open HACS and add this repository:
+Run the local suites from the development repository:
 
-   [![Add to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Tech-Morph&repository=HA-PS4-GoldHEN-Integration&category=integration)
+```bash
+python3 -B tests/test_ftp_telemetry.py
+python3 -B tests/test_issue1_connection.py
+python3 -B tests/test_klog_shared.py
+python3 -B tests/test_websocket_ftp_runtime.py
+python3 -B tests/test_ftp_listing.py
+node --check custom_components/ps4_goldhen/frontend/ps4-goldhen-panel.js
+node tests/test_klog_frontend.cjs
+node tests/test_ftp_listing_frontend.cjs
+git diff --check
+```
 
-   Or manually: **HACS → Integrations → ⋮ → Custom Repositories** → add `Tech-Morph/HA-PS4-GoldHEN-Integration` as type `Integration`.
+These use mocks/stubs and loopback sockets, not a complete Home Assistant test environment or native PS4 compatibility suite. Owner-reported HA deployment, offline startup, and recovery checks passed. Fresh new-entry configuration and reporter firmware 9.00 validation remain separate checks. Preserve code/config backups and test rollback before production rollout.
 
-2. Search for **PS4 GoldHEN** in HACS and click **Download**.
-3. **Restart Home Assistant.**
-4. Go to **Settings → Devices & Services → Add Integration** → search **PS4 GoldHEN**.
-5. Fill in the config form (see below).
+## Support and license
 
-### Method 2 — Manual
-
-1. Download or clone this repository.
-2. Copy the `custom_components/ps4_goldhen` folder into your HA `config/custom_components/` directory.
-3. Restart Home Assistant.
-4. Go to **Settings → Devices & Services → Add Integration** → search **PS4 GoldHEN**.
-
----
-
-## 🔧 Configuration
-
-All configuration is done via the UI config flow. No `configuration.yaml` editing required.
-
-| Field | Default | Description |
-|---|---|---|
-| **PS4 Host / IP** | — | LAN IP address of your PS4 |
-| **FTP Port** | `2121` | GoldHEN FTP server port |
-| **BinLoader Port** | `9090` | GoldHEN BinLoader TCP port |
-| **Klog Port** | `3232` | GoldHEN debug log server port |
-| **RPI Port** | `8080` | Port of your optional Pi REST sensor |
-
-You can configure **multiple PS4 consoles** — add the integration again for each one.
-
----
-
-## 📂 Payload Directory
-
-Payloads are stored in `/config/ps4_payloads/` on your HA instance. Any `.bin` or `.elf` file placed here will appear in the BinLoader tab and be available to the `send_payload` service.
-
-Bundled payloads included with the integration are copied here automatically on first run.
-
----
-
-## 📡 Power State Detection
-
-The **Current Game** sensor uses a two-source logic for power state:
-
-1. **`sensor.ps4_state_pi`** — If you have a Pi (or any device) exposing a REST sensor at this entity ID with states `on` / `rest` / `offline`, the integration uses it to detect Rest Mode and powered-off states cleanly.
-2. **klog stream** — When the PS4 is `on`, the klog state machine tracks foreground app changes in real time via multiple signal patterns (`[SL] AppFocusChanged`, `[BGFT] GameWillStart`, `GameStopped`, etc.).
-
-If you don't have a Pi sensor, the integration still works — it will track game state from klog and assume `on` when klog is connected.
-
----
-
-## 🌡️ Telemetry Architecture
-
-Temperature, power, fan, and hardware data do not depend on klog. Instead:
-
-1. **PS4StateJSON.prx** runs as a GoldHEN plugin on the PS4, writing `/data/GoldHEN/ps4_state.json` every **3 seconds**.
-2. **Home Assistant** polls this file over FTP every **3 seconds** using a raw async PASV FTP connection.
-3. Values are merged directly into the coordinator data and pushed to all sensor entities immediately.
-
-This means sensors update even on the PS4 home screen (not just while a game is running), and telemetry is never lost if the klog connection drops or reconnects.
-
-Static hardware values (`fw_version`, `hw_model`, `console_id`) are resolved once at plugin load and cached for the lifetime of the session — they are written to every JSON update but never change at runtime.
-
----
-
-## 🎮 Game Title & Art Resolution
-
-On startup (and every hour by default), the integration:
-
-1. Connects to the PS4 over FTP
-2. Downloads `app.db` from `/system_data/priv/mms/app.db`
-3. Parses the installed app library using SQLite
-4. Builds an in-memory game map: `{ CUSA12345: { name: "...", cover: "..." } }`
-
-This map populates `sensor.ps4_goldhen_current_game` with human-readable game names and drives the `game_name` / `game_cover` attributes. If the PS4 is offline at startup, the sensor falls back to the raw Title ID and retries on the next refresh cycle.
-
----
-
-## 🔍 Troubleshooting
-
-### Sensors show `unavailable` after install
-- Fully restart HA after installation, not just a reload.
-- Check **Settings → System → Logs** and filter for `ps4_goldhen`.
-
-### Current Game shows Title ID instead of game name
-- The PS4 may have been offline when HA started — wait for the next hourly refresh, or restart HA with the PS4 on.
-- Check HA logs for `app.db` — table names and row counts are logged at startup.
-
-### Temperature / power / fan sensors show `unknown`
-- `PS4StateJSON.prx` must be installed as a GoldHEN plugin — see [PS4StateJSON PRX Setup](#ps4statejson-prx-setup).
-- Confirm the file exists and contains all expected keys:
-  ```bash
-  curl -s ftp://<PS4_IP>:2121/data/GoldHEN/ps4_state.json --user anonymous:
-  ```
-  The output should contain all 10 keys including `fan_duty`, `fw_version`, `hw_model`, and `console_id`. If only 6 keys appear, the old PRX is still running — perform a full cold boot (hold power button until double beep).
-- If the file is missing entirely, the PRX may not have loaded — check `plugin.ini` and confirm a cold boot was performed.
-
-### Fan Duty shows `unknown`
-- This key is only present in PS4StateJSON v14.0 or later. Verify the running version via klog:
-  ```bash
-  nc <PS4_IP> 3232 | grep "plugin_load"
-  ```
-  Should show `[PS4StateJSON] plugin_load v14.0`. If it shows an older version, rebuild and redeploy the PRX then cold reboot.
-
-### Hardware Model shows wrong value
-- The model is auto-detected from the Neo flag and firmware version. To set the exact CUH number, create `/data/GoldHEN/ps4_state.conf` on the PS4 with `hw_model=CUH-XXXX` and cold reboot.
-
-### Fan is louder than expected
-- The `Fan Duty` percentage reflects PWM duty cycle, not physical RPM. The PS4 fan (especially on CUH-1001A) is non-linear and audibly loud even at moderate duty values.
-- On first-gen hardware, consider cleaning the fan and heatsink and replacing thermal paste — this typically reduces operating temps by 8–12°C, keeping the fan at lower duty steps for longer.
-
-### Power values look wrong
-- Power sensors report in **watts** (e.g. `13.2 W`). Update any existing automations or dashboard cards that referenced older milliwatt values.
-
-### FTP not working
-- Confirm GoldHEN FTP is enabled and the PS4 is reachable on the configured port.
-- GoldHEN FTP is unauthenticated — do not set credentials.
-
-### Klog not streaming
-- Only one client can connect to the GoldHEN klog port at a time — make sure nothing else (e.g. `nc`) is consuming it.
-- The HA backend holds the klog connection persistently; the panel UI subscribes via WebSocket and does not connect directly.
-
-### BinLoader send says success but nothing happens
-- Confirm BinLoader is enabled in GoldHEN settings.
-- Verify the PS4 host and port in the integration config.
-
----
-
-## 🤝 Contributing
-
-PRs are welcome. Please:
-- Keep WebSocket message schemas consistent with existing handlers.
-- Ensure all async tasks and subscriptions clean up on unload.
-- Prefer `async` I/O — avoid blocking calls on the event loop.
-- Test with at least one real or mocked PS4 FTP/klog endpoint.
-
----
-
-## 💛 Support
-
-If this integration saves you time or brings value to your setup, consider supporting development:
-
-[![Ko-fi](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/techmorph)
-
----
-
-## 📄 License
-
-MIT — see [LICENSE](LICENSE).
+[Support Tech-Morph](https://ko-fi.com/techmorph). MIT license; see [LICENSE](LICENSE).

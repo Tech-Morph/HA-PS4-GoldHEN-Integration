@@ -1,52 +1,45 @@
-# Bundled payloads
+# Bundled payload resources
 
-Payloads are "auto-installed" into /config/ps4_payloads after HACS install, you can add custom payloads to the folder to make them show in the binloader.
+The integration copies absent `.bin`/`.elf` resources from this folder to HA's `/config/ps4/payloads` during integration setup. It does not overwrite existing destination names, send a payload, or execute one just by copying. Removing a resource here does not delete a previously copied or custom HA file.
 
-Below is a list of what each payload does:
+The Payloads tab lists those HA-local resources. Sending requires explicit user action and a running BinLoader, default TCP 9090. A transfer success message is not execution confirmation.
 
+## Compatibility and safety
 
-- App2USB.bin: Moves installed PKG games & apps from the internal HDD to an external USB drive.
+This repository does not provide a verified per-binary source/firmware/provenance manifest. Names are inventory labels, not proof of behavior or compatibility. Inspect trusted source/build identity and independently validate a payload for your console before use. Do not send bundled tools to diagnose an HA connection timeout. No firmware update, fan-control, privilege, kernel, or storage-modification behavior is certified by the HA repair.
 
-- app-dumper.bin: Dumps installed games & applications.
+`restart.bin` and `standby.bin` are not included; the corresponding button entities are not validated bundled power controls. PKG installation is not implemented.
 
-- backup.bin: Creates backups of important system data.
+## Exact bundled filenames
 
-- disable-aslr.bin: Disables ASLR (memory randomization), typically for advanced/debug use.
+- `Linux-1gb.bin`
+- `Linux-2gb.bin`
+- `Linux-3gb.bin`
+- `Linux-4gb.bin`
+- `WebRTE.bin`
+- `app-dumper.bin`
+- `app2usb.bin`
+- `backup.bin`
+- `disable-aslr.bin`
+- `disable-updates.bin`
+- `enable-browser.bin`
+- `enable-updates.bin`
+- `exit-idu.bin`
+- `fan-threshold.bin`
+- `ftp.bin`
+- `history-blocker.bin`
+- `kernel-clock.bin`
+- `kernel-dumper.bin`
+- `module-dumper.bin`
+- `np-fake-signin-ps4.elf`
+- `permanent-uart.bin`
+- `ps4-debug_v1.1.16.bin`
+- `ps4-sflash0-dumper.bin`
+- `pup-decrypt.bin`
+- `restore.bin`
+- `rif-renamer.bin`
+- `todex.bin`
 
-- disable-updates.bin: Blocks system firmware updates.
+This inventory includes an ELF resource as well as BIN resources; case and punctuation reflect the actual files. Do not substitute similarly named binaries from unrelated archives.
 
-- enable-browser.bin: Enables the PS4 browser if it’s disabled.
-
-- enable-updates.bin: Re-enables system updates (undoes update-blocking).
-
-- exit-idu.bin: Exits IDU (in-store demo) mode.
-
-- fan-threshold.bin: Adjusts fan threshold / fan behavior to help manage temperatures.
-
-- ftp.bin: Enables FTP access to the PS4 filesystem.
-
-- history-blocker.bin: Prevents browser/activity history from being saved.
-
-- kernel-clock.bin: Modifies the system clock at kernel level.
-
-- kernel-dumper.bin: Dumps kernel memory (advanced users).
-
-- module-dumper.bin: Dumps decrypted system modules (e.g., from /system, /system_ex, /update) to a USB device.
-
-- permanent-uart.bin: Enables UART debugging access (described as enabling hardware-based UART and persisting through updates in at least one payload overview).
-
-- ps4-debug_v1.1.16.bin: PS4Debug is commonly referenced as a debugging/modding-related payload in payload overviews (the specific “what it does” details vary by build/source).
-
-- pup-decrypt.bin: Decrypts firmware PUP files.
-
-- restore.bin: Restores backups or a previous state (often paired conceptually with “Backup”).
-
-- rif-renamer.bin: Renames license (RIF) files.
-
-- todex.bin: Converts/puts the PS4 into “DEX” developer-like mode (advanced).
-
-- WebRTE.bin: Web Realtime Trainer Engine; when used with a trainer site/app, it hooks game memory so cheats can be enabled in real time without manually patching eboot.bin.
-
-- Linux-1gb.bin / Linux-2gb.bin / Linux-3gb.bin / Linux-4gb.bin: Used to activate linux on ps4 (Choose between 1 - 4 GB of RAM)
-
-- ps4-sflash0-dumper.bin: This payload was made for dumping NOR firmware (so called Sflash0) to USB drive instead using FTP.
+[Main documentation](../../../README.md)
