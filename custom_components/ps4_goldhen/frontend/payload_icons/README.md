@@ -1,10 +1,14 @@
-# Payload icon assets
+# Payload icons
 
-This directory is served under `/api/ps4_goldhen/frontend/payload_icons/`. The frontend normalizes the payload name and maps it to an icon filename. Filenames and case below match the current panel mapping.
+Put payload icon images in this folder. The panel serves them from:
 
-A payload with no mapping uses the GoldHEN logo. A mapped but missing image can still produce a broken image; the mapping is not an existence/compatibility check. Icons do not prove payload execution safety or firmware support.
+```text
+/api/ps4_goldhen/frontend/payload_icons/<filename>
+```
 
-## Mapped filenames
+The mapping is in `_payloadIconUrl()` in `ps4-goldhen-panel.js`. It uses the normalized payload name to choose an image. Use the filenames and case below.
+
+## Current filenames
 
 - `Linux-1gb.png`
 - `Linux-2gb.png`
@@ -33,6 +37,8 @@ A payload with no mapping uses the GoldHEN logo. A mapped but missing image can 
 - `rif-renamer.png`
 - `todex.png`
 
-The panel adds an icon cache token. This is an asset directory, not a payload installation directory; executable resources belong in HA's `/config/ps4/payloads`.
+If a payload has no mapping, the panel uses the GoldHEN logo. If it has a mapping but the image is missing, you can still get a broken image. The panel adds a cache token to icon URLs.
 
-[Main documentation](../../../../README.md)
+This folder is for images only. Payload binaries belong in `/config/ps4/payloads` on the HA host.
+
+[Back to the main README](../../../../README.md)

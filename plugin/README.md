@@ -1,14 +1,14 @@
-# PS4State plugin status
+# PS4StateJSON
 
-<!-- ps4state-not-working -->
 > [!WARNING]
-> `PS4StateJSON.prx` (the PS4State plugin) is under active development and is **not** currently in working order. Do not install or enable it.
->
-> The Home Assistant integration works independently of this plugin. Temperature, power, fan, and hardware telemetry should remain unknown without a working, validated producer. The connection repair does not fix or validate this PRX, its firmware compatibility, fan control, audio, or game-saving behavior.
-<!-- /ps4state-not-working -->
+> `PS4StateJSON.prx` is under development and is **not** working yet. Do not install or enable it.
 
-The bundled `PS4StateJSON.prx` is retained as a historical/development artifact, not a working or firmware-certified release. This change does not rebuild or replace the binary.
+I'm still working on this plugin. The PRX in this folder is an old development copy, not a usable release. The Home Assistant connection fixes don't rebuild it or fix its sensor APIs, fan control, audio, or saving behavior.
 
-Do not use it to diagnose Home Assistant connection failures. Base FTP/klog integration does not require the PRX. Preserve existing GoldHEN plugin rules; do not create global activation rules or enable the historical binary as a workaround.
+FTP, klog, and payload sending work without it. Don't load it to fix an HA setup error or get rid of unknown telemetry readings.
 
-Native producer repair and validation remain separate. No private sensor API layout, physical units, power-rail aggregation, fan restoration, audio, game saving, or all-firmware support is certified by the Home Assistant repair.
+There is still work to do on the sensor data, firmware support, fan behavior, and plugin lifetime. A plugin loaded by a game also doesn't mean it will keep updating data on the home screen.
+
+The GoldHEN configuration file is `/data/GoldHEN/plugins.ini`. Leave other plugin rules alone; editing a rule isn't proof that an already loaded plugin has stopped. There are no activation instructions here while this build isn't working.
+
+[Back to the main README](../README.md)
