@@ -32,7 +32,7 @@ def load_integration():
             pass
 
     api = module("homeassistant.components.websocket_api",
-                 websocket_command=lambda schema: lambda fn: fn,
+                 websocket_command=lambda schema: lambda fn: fn, require_admin=lambda fn: fn,
                  async_response=lambda fn: fn, async_register_command=lambda *a: None)
     vol = module("voluptuous", Schema=lambda value: value,
                  Required=lambda value, **kw: value, Optional=lambda value, **kw: value,

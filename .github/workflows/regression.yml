@@ -55,6 +55,7 @@ jobs:
           python -B tests/test_klog_shared.py
           python -B tests/test_websocket_ftp_runtime.py
           python -B tests/test_ftp_listing.py
+          python -B tests/test_security.py
 
   frontend:
     name: Frontend

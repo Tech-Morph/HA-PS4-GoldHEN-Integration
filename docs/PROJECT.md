@@ -82,7 +82,7 @@ MLSD `modify` fields are parsed as UTC with optional fractional seconds. The pan
 
 The panel escapes FTP table/editor content. That scoped repair is not a complete audit of all innerHTML, permission checks, routes, or transfer limits. Raw-klog events are limited to 8,192 characters per line and an unfinished listener line is bounded to 65,536 characters. Frontend generations and connection guards suppress overlapping or obsolete subscriptions.
 
-WebSocket commands:
+WebSocket commands (all admin-only, like the sidebar panel):
 
 - `ps4_goldhen/list_entries`
 - `ps4_goldhen/list_payloads`
@@ -94,19 +94,19 @@ WebSocket commands:
 - `ps4_goldhen/ftp_put_text`
 - `ps4_goldhen/klog_subscribe`
 
-HTTP endpoints are FTP download (GET), FTP upload (POST multipart), and cover GET at `/api/ps4_goldhen/cover/{entry_id}/{title_id}`. FTP views require HA authentication. The legacy cover view does not; title/path validation and authorization policy still need review. Known cover metadata can redirect to external CDN URLs.
+HTTP endpoints are FTP download (GET), FTP upload (POST multipart), and cover GET at `/api/ps4_goldhen/cover/{entry_id}/{title_id}`. FTP views require HA authentication and return 403 for non-admin users. The cover view has no login, because a dashboard `<img>` can't send HA's token; it accepts title-ID-shaped names only and serves only the CDN redirect from known cover metadata or the disk cache, never FTP. HA fills that cache itself when a game starts, one FTP fetch at a time across consoles, and waits 5 minutes after a failed fetch before retrying that title.
 
 ## Payload and native boundaries
 
-Only `ps4_goldhen.send_payload` is registered. It uses a global handler that captures setup defaults; multi-console callers should provide both host and BinLoader port. The current buttons do not do this. `restart.bin`/`standby.bin` are absent from the bundled resources. PKG/RPI/etaHEN/PS5 installation is not implemented.
+Only `ps4_goldhen.send_payload` is registered. `ps4_host` must name a console set up in this integration; without it, the first entry's console is used. The BinLoader port always comes from that console's entry, and a `binloader_port` in the call is ignored. The current buttons don't pass a host. `restart.bin`/`standby.bin` are absent from the bundled resources. PKG/RPI/etaHEN/PS5 installation is not implemented.
 
-Sending bytes is not confirmed payload execution. Legacy absolute/relative payload-path handling is not fully restricted to a safe root. Resource copying is nonexecuting, skips existing destination names, and does not remove previously copied resources when a bundled file is removed later.
+Sending bytes is not confirmed payload execution. `payload_file` must be the name of a file directly inside `/config/ps4/payloads`; paths, `..` and links that resolve outside it are refused. Resource copying is nonexecuting, skips existing destination names, and does not remove previously copied resources when a bundled file is removed later.
 
 PS4StateJSON is a separate native producer under repair. This HA connection repair does not change/validate PRX APIs, private output layouts, privilege operations, thread lifetime, fan control/restoration, or audio/game saving. Title-loaded PRX lifetime does not prove home-screen telemetry. Preserve unrelated plugins.ini rules and original native projects.
 
 ## Validation and open work
 
-Five Python suites contain 56 tests: FTP telemetry 17, issue connection 13, shared klog 8, full-module FTP handlers 7, listings 11. Separate Node syntax and two assertion scripts cover frontend behavior. Test counts describe the current development tree, not future versions or a full HA/native compatibility suite.
+Six Python suites contain 71 tests: FTP telemetry 17, issue connection 13, shared klog 8, full-module FTP handlers 7, listings 11, security 15. Separate Node syntax and two assertion scripts cover frontend behavior. Test counts describe the current development tree, not future versions or a full HA/native compatibility suite.
 
 Issue-connection tests use loopback sockets and import the complete integration module with HA interfaces stubbed. Setup tests record worker creation and skip live worker/frontend/platform behavior. Existing suites also use mocks and selected-function extraction. Keep these limits explicit.
 
