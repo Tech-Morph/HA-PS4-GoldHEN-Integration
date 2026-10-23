@@ -10,8 +10,8 @@ def payload_target(
 ) -> tuple[str, int]:
     """(host, BinLoader port) for the call.
 
-    `ps4_host` picks one of this integration's consoles; without it the first console is used. The port always comes
-    from that console's entry. ValueError if no console is set up or the host isn't one of them.
+    `ps4_host` picks one of this integration's consoles; without it the first console is used. The port comes from that
+    console's entry. ValueError if no console is set up or the host isn't one of them.
     """
     targets: dict[str, int] = {}
     for data in consoles:
@@ -28,11 +28,15 @@ def payload_target(
 
 
 def payload_path(payload_dir: str, payload_file: str) -> str:
-    """Full path of a file directly inside payload_dir; ValueError for a path, `..` or a link that leads outside."""
+    """Full path of a file directly inside payload_dir, given by its name or its full path; ValueError for any other
+    path, `..` or a link that leads outside."""
     name = (payload_file or "").strip()
-    if not name or name in (".", "..") or os.path.basename(name) != name:
-        raise ValueError(f"payload_file must be a file name in {payload_dir}")
-    path = os.path.realpath(os.path.join(payload_dir, name))
-    if os.path.dirname(path) != os.path.realpath(payload_dir):
-        raise ValueError(f"payload_file must be a file name in {payload_dir}")
+    if os.path.isabs(name):
+        path = os.path.realpath(name)
+    elif name and name not in (".", "..") and os.path.basename(name) == name:
+        path = os.path.realpath(os.path.join(payload_dir, name))
+    else:
+        path = None
+    if path is None or os.path.dirname(path) != os.path.realpath(payload_dir):
+        raise ValueError(f"payload_file must be a file name in {payload_dir} (move the file there and pass its name)")
     return path

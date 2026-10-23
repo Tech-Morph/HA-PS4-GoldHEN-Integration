@@ -10,10 +10,10 @@ Manual dispatch is included. The Actions-tab Run workflow control becomes availa
 |---|---|
 | Python 3.13 | Python/JSON syntax checks and all six Python suites |
 | Python 3.14 | The same checks on the second Python version |
-| Frontend | Panel syntax, klog subscription assertions, and FTP date/escaping assertions on Node 24 |
+| Frontend | Panel syntax, klog subscription assertions, FTP date/escaping assertions, and the payload target after a console switch on Node 24 |
 | Regression | Final gate; succeeds only when the Python matrix and frontend jobs succeed |
 
-The current Python suites contain 71 tests: FTP telemetry 17, connection/setup 13, shared klog 8, full-module FTP handlers 7, listings 11, and security 15. The workflow runs each script separately, just like the local commands. The matrix runs those suites on both Python versions; that isn't 142 distinct tests.
+The current Python suites contain 74 tests: FTP telemetry 17, connection/setup 13, shared klog 8, full-module FTP handlers 7, listings 11, and security 18. The workflow runs each script separately, just like the local commands. The matrix runs those suites on both Python versions; that isn't 148 distinct tests.
 
 There is no pip or npm dependency install for these tests. They use the standard library, Node built-ins, HA interface stubs, and loopback FTP servers. HACS/hassfest validation stays in the existing workflows.
 

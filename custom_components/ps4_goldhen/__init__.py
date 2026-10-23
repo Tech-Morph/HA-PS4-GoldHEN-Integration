@@ -25,6 +25,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -80,7 +81,7 @@ _PANEL_SIDEBAR_ICON   = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT   = "ps4-goldhen-panel"
 
 _JS_STATIC_URL            = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=ftp-listing-repair-3"
+_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=payload-target-1"
 _LOGO_STATIC_URL          = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
@@ -846,8 +847,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_send_payload(call: ServiceCall) -> None:
         # Only a file directly inside PAYLOAD_DIR, only to a console set up in
-        # this integration, on that console's BinLoader port (binloader_port in
-        # the call is ignored).
+        # this integration. binloader_port in the call overrides that
+        # console's port.
         try:
             t_host, t_port = payload_target(
                 (e.data for e in hass.config_entries.async_entries(DOMAIN)),
@@ -859,11 +860,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             filepath = payload_path(PAYLOAD_DIR, call.data["payload_file"])
         except ValueError as err:
             raise HomeAssistantError(str(err)) from err
+        if call.data.get("binloader_port"):
+            t_port = int(call.data["binloader_port"])
         await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
 
+    # Admin-only like the panel: HA refuses a call from a non-admin user
+    # (Unauthorized); calls without a user, such as automations, still run.
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(
-            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
+        async_register_admin_service(
+            hass, DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
             schema=_SEND_PAYLOAD_SCHEMA,
         )
 

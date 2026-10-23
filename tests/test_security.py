@@ -1,4 +1,5 @@
-"""Admin-only panel/commands/views, send_payload limits, and a cover view that never opens FTP; no PS4 access required."""
+"""Admin-only panel/commands/views/service, send_payload limits, and a cover view that never opens FTP; no PS4 access
+required."""
 import asyncio
 import importlib.util
 import os
@@ -14,6 +15,7 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components/ps4_goldhen"
 REGISTERED_COMMANDS = []
+ADMIN_SERVICES = {}
 
 
 class Response:
@@ -68,6 +70,8 @@ def load_integration():
             ServiceCall=object, callback=lambda fn: fn),
         "homeassistant.exceptions": module("homeassistant.exceptions", HomeAssistantError=RuntimeError),
         "homeassistant.helpers": module("homeassistant.helpers"),
+        "homeassistant.helpers.service": module("homeassistant.helpers.service",
+            async_register_admin_service=lambda hass, domain, name, fn, schema: ADMIN_SERVICES.setdefault(name, fn)),
         "homeassistant.helpers.update_coordinator": module("homeassistant.helpers.update_coordinator",
             DataUpdateCoordinator=object),
     }
@@ -167,12 +171,12 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         entries = [SimpleNamespace(data={"ps4_host": "192.0.2.1", "binloader_port": 9090}),
                    SimpleNamespace(data={"ps4_host": "192.0.2.2", "binloader_port": 9091})]
-        registered = {}
+        ADMIN_SERVICES.clear()
+        self.plain_register = Mock()
         hass = SimpleNamespace(data={},
             config_entries=SimpleNamespace(async_forward_entry_setups=AsyncMock(),
                                            async_entries=lambda domain: entries),
-            services=SimpleNamespace(has_service=lambda *a: False,
-                                     async_register=lambda domain, name, fn, schema: registered.setdefault(name, fn)))
+            services=SimpleNamespace(has_service=lambda *a: False, async_register=self.plain_register))
         state = self.integration._global(hass)
         for key in state:
             state[key] = True
@@ -192,7 +196,7 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.integration, "async_fetch_telemetry", telemetry), \
              patch.object(self.integration, "DataUpdateCoordinator", Coord):
             self.assertTrue(await self.integration.async_setup_entry(hass, entry))
-        self.handler = registered["send_payload"]
+        self.handler = ADMIN_SERVICES["send_payload"]
         self.sent = AsyncMock()
         for patcher in (patch.object(self.integration, "_send_bin_tcp", self.sent),
                         patch.object(self.integration, "PAYLOAD_DIR", self.payloads)):
@@ -202,13 +206,29 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
     async def call(self, **data):
         await self.handler(SimpleNamespace(data={"timeout": 30, **data}))
 
+    def test_service_is_registered_admin_only(self):
+        # HA's admin wrapper raises Unauthorized for a non-admin user's call (WebSocket, REST, a script they start)
+        self.assertIn("send_payload", ADMIN_SERVICES)
+        self.plain_register.assert_not_called()
+
     async def test_file_name_goes_to_first_console_on_its_port(self):
-        await self.call(payload_file="info.elf", binloader_port=1234)
+        await self.call(payload_file="info.elf")
         self.sent.assert_awaited_once_with("192.0.2.1", 9090, os.path.join(self.payloads, "info.elf"), 30)
 
     async def test_ps4_host_picks_a_configured_console_and_its_port(self):
-        await self.call(payload_file="info.elf", ps4_host="192.0.2.2", binloader_port=9999)
+        await self.call(payload_file="info.elf", ps4_host="192.0.2.2")
         self.sent.assert_awaited_once_with("192.0.2.2", 9091, os.path.join(self.payloads, "info.elf"), 30)
+
+    async def test_binloader_port_in_the_call_is_used(self):
+        await self.call(payload_file="info.elf", ps4_host="192.0.2.2", binloader_port=9999)
+        self.sent.assert_awaited_once_with("192.0.2.2", 9999, os.path.join(self.payloads, "info.elf"), 30)
+
+    async def test_full_path_to_a_file_in_the_payload_folder_is_accepted(self):
+        for name in (os.path.join(self.payloads, "info.elf"), os.path.join(self.payloads, ".", "info.elf")):
+            with self.subTest(payload_file=name):
+                self.sent.reset_mock()
+                await self.call(payload_file=name)
+                self.sent.assert_awaited_once_with("192.0.2.1", 9090, os.path.join(self.payloads, "info.elf"), 30)
 
     async def test_unknown_host_is_refused(self):
         with self.assertRaisesRegex(RuntimeError, "not a PS4 set up"):
@@ -217,7 +237,9 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_paths_outside_the_payload_folder_are_refused(self):
         for name in (os.path.join(self.tmp.name, "secrets.yaml"), "../secrets.yaml", "sub/info.elf",
-                     "../payloads/info.elf", "..", ".", "", "link.bin"):
+                     "../payloads/info.elf", "..", ".", "", "link.bin",
+                     os.path.join(self.payloads, "..", "secrets.yaml"), os.path.join(self.payloads, "link.bin"),
+                     os.path.join(self.payloads, "sub", "info.elf"), self.payloads, "/"):
             with self.subTest(payload_file=name):
                 with self.assertRaisesRegex(RuntimeError, "must be a file name in"):
                     await self.call(payload_file=name)

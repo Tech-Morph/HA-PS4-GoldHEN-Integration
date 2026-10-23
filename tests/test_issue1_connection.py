@@ -53,6 +53,7 @@ def load_integration():
         "homeassistant.data_entry_flow": module("homeassistant.data_entry_flow", FlowResult=dict),
         "homeassistant.exceptions": module("homeassistant.exceptions", HomeAssistantError=RuntimeError),
         "homeassistant.helpers": module("homeassistant.helpers"),
+        "homeassistant.helpers.service": module("homeassistant.helpers.service", async_register_admin_service=lambda *a, **k: None),
         "homeassistant.helpers.update_coordinator": module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=Coordinator),
     }
     name = "_ps4_issue1_test"

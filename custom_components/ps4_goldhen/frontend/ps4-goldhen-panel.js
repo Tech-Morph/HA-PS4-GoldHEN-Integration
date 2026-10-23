@@ -33,8 +33,6 @@ class PS4GoldHENPanel extends HTMLElement {
     // BinLoader state
     this._payloads = [];
     this._payloadDir = "";
-    this._binHost = "";
-    this._binPort = "";
     this._binTimeout = "30";
     this._binStatus = "";
     this._payloadFilter = "";
@@ -83,12 +81,6 @@ class PS4GoldHENPanel extends HTMLElement {
       const configured = this._panel?.config?.entry_id;
       const first = this._entries[0]?.entry_id || null;
       this._selectedEntryId = configured || this._selectedEntryId || first;
-
-      const entry = this._selectedEntry();
-      if (entry) {
-        this._binHost = entry.ps4_host || "";
-        this._binPort = String(entry.binloader_port ?? "");
-      }
     } catch (e) {
       this._entries = [];
       this._selectedEntryId = null;
@@ -98,6 +90,17 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _selectedEntry() {
     return this._entries.find((e) => e.entry_id === this._selectedEntryId) || null;
+  }
+
+  _selectEntry(entryId) {
+    this._klogDisconnect(false);
+    this._klogManuallyDisconnected = false;
+
+    this._selectedEntryId = entryId;
+    this._klogLines = [];
+    this._editing = null;
+    this._path = "/";
+    this._ftpEntries = [];
   }
 
   // Signed paths are ideal for GET downloads; uploads should use authenticated fetch.
@@ -366,26 +369,12 @@ class PS4GoldHENPanel extends HTMLElement {
       return;
     }
 
-    // Prefer live input values, fall back to stored state, then entry defaults
-    const host =
-      (this.shadowRoot.querySelector("#bin-host")?.value || "").trim() ||
-      this._binHost ||
-      entry.ps4_host;
-
-    const port = parseInt(
-      (this.shadowRoot.querySelector("#bin-port")?.value || "").trim() ||
-        this._binPort ||
-        entry.binloader_port,
-      10
-    );
-
+    // Always the selected console, on the BinLoader port from its entry
     const timeout = parseFloat(
       (this.shadowRoot.querySelector("#bin-timeout")?.value || "").trim() || this._binTimeout || "30"
     );
 
     // Persist what user typed (so it doesn't reset on re-render)
-    this._binHost = host;
-    this._binPort = String(port || "");
     this._binTimeout = String(timeout || "");
 
     this._setLoading(true);
@@ -395,8 +384,7 @@ class PS4GoldHENPanel extends HTMLElement {
     try {
       await this._hass.callService("ps4_goldhen", "send_payload", {
         payload_file: payload,
-        ps4_host: host,
-        binloader_port: port,
+        ps4_host: entry.ps4_host,
         timeout: timeout,
       });
       this._binStatus = `Payload sent: ${payload}`;
@@ -602,22 +590,7 @@ class PS4GoldHENPanel extends HTMLElement {
     const sel = this.shadowRoot.querySelector("#entry-select");
     if (sel) {
       sel.onchange = async () => {
-        this._klogDisconnect(false);
-        this._klogManuallyDisconnected = false;
-
-        this._selectedEntryId = sel.value;
-        this._klogLines = [];
-        this._editing = null;
-        this._path = "/";
-        this._ftpEntries = [];
-
-        const entry = this._selectedEntry();
-        if (entry) {
-          // Only set defaults if user hasn't typed overrides
-          if (!this._binHost) this._binHost = entry.ps4_host || "";
-          if (!this._binPort) this._binPort = String(entry.binloader_port ?? "");
-        }
-
+        this._selectEntry(sel.value);
         await this._loadDir("/");
         this._render();
       };
@@ -666,13 +639,9 @@ class PS4GoldHENPanel extends HTMLElement {
         };
       }
 
-      const host = this.shadowRoot.querySelector("#bin-host");
-      const port = this.shadowRoot.querySelector("#bin-port");
       const timeout = this.shadowRoot.querySelector("#bin-timeout");
       const filter = this.shadowRoot.querySelector("#payload-filter");
 
-      if (host) host.oninput = () => (this._binHost = host.value);
-      if (port) port.oninput = () => (this._binPort = port.value);
       if (timeout) timeout.oninput = () => (this._binTimeout = timeout.value);
       if (filter) {
         filter.oninput = () => {
@@ -779,8 +748,9 @@ class PS4GoldHENPanel extends HTMLElement {
 
   _renderBinLoader() {
     const entry = this._selectedEntry();
-    const shownHost = this._binHost || entry?.ps4_host || "";
-    const shownPort = this._binPort || String(entry?.binloader_port ?? "");
+    const target = entry
+      ? `${entry.title || entry.ps4_host} (${entry.ps4_host}:${entry.binloader_port ?? ""})`
+      : "no PS4 selected";
     const shownTimeout = this._binTimeout || "30";
 
     const filter = (this._payloadFilter || "").trim().toLowerCase();
@@ -794,8 +764,7 @@ class PS4GoldHENPanel extends HTMLElement {
         <h3>Payloads (click an icon to send)</h3>
 
         <div class="payload-toolbar">
-          <input id="bin-host" type="text" placeholder="PS4 Host" value="${shownHost}" style="min-width:240px;">
-          <input id="bin-port" type="number" placeholder="Port" value="${shownPort}" style="width:160px;">
+          <span class="pill">Sends to: ${this._escapeHtml(target)}</span>
           <input id="bin-timeout" type="number" placeholder="Timeout (s)" value="${shownTimeout}" style="width:160px;">
           <button class="btn" id="btn-refresh-payloads">Refresh</button>
           <input id="payload-filter" type="search" placeholder="Filter payloads..." value="${this._payloadFilter || ""}" style="min-width:220px;">

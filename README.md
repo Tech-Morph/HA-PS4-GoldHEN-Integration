@@ -46,7 +46,7 @@ There isn't a separate Game Library or Dashboard tab. The current-game sensor us
 
 The repaired backend owns one klog connection per entry. The panel subscribes to it rather than opening another PS4 connection. There is no history replay, and a subscription label isn't proof of received logs. Close competing klog clients if the panel stays empty.
 
-The panel, its WebSocket commands, and the FTP download / upload URLs are for HA admins only.
+The panel, its WebSocket commands, the FTP download / upload URLs, and the `send_payload` service are for HA admins only. Automations can still call the service.
 
 ## Payloads
 
@@ -65,7 +65,7 @@ data:
   timeout: 30
 ```
 
-The service only takes the name of a file directly inside `/config/ps4/payloads`; paths and `..` are refused. `ps4_host` picks the console and must be one set up in this integration; without it, the first console is used. The port always comes from that console's entry, so `binloader_port` is ignored. Button targeting still needs work. The timeout isn't a whole-transfer deadline.
+The service takes the name of a file directly inside `/config/ps4/payloads`, or its full path there; other paths and `..` are refused. `ps4_host` picks the console and must be one set up in this integration; without it, the first console is used. `binloader_port` sets the port for that call; without it, the console's entry port is used. Calls from non-admin users are refused (HA's admin-service check); automations still work. The panel always sends to the console selected at the top. Button targeting still needs work. The timeout isn't a whole-transfer deadline.
 
 `restart.bin` and `standby.bin` aren't bundled, so don't treat those buttons as working power controls. There is no `install_pkg` service or PS5 installer.
 
