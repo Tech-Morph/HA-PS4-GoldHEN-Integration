@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections import deque
 from datetime import timedelta
 from functools import partial
@@ -24,6 +25,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -65,6 +67,7 @@ from .const import (
 )
 from . import db as ps4_db
 from .ftp_telemetry import async_fetch_telemetry
+from .payload_target import payload_path, payload_target
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,7 +81,7 @@ _PANEL_SIDEBAR_ICON   = "mdi:sony-playstation"
 _PANEL_WEBCOMPONENT   = "ps4-goldhen-panel"
 
 _JS_STATIC_URL            = "/api/ps4_goldhen/frontend/ps4-goldhen-panel.js"
-_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=ftp-listing-repair-3"
+_JS_MODULE_URL            = f"{_JS_STATIC_URL}?v=payload-target-1"
 _LOGO_STATIC_URL          = "/api/ps4_goldhen/frontend/goldhen_logo.png"
 _PAYLOAD_ICONS_STATIC_URL = "/api/ps4_goldhen/frontend/payload_icons"
 
@@ -89,6 +92,9 @@ _IDLE_STATE         = "Idle"
 _HOME_SCREEN_APP_ID = "NPXS20001"
 
 _TITLE_ID_RE = re.compile(r"[A-Z]{4}\d{5}")
+
+# A failed cover fetch for a title waits this long before the next try.
+_COVER_RETRY_SECONDS = 300
 
 _KLOG_SL_FOCUS_PATTERN = re.compile(
     r"\[SL\]\s+AppFocusChanged\s+\[([A-Z0-9]+)\]\s*->\s*\[([A-Z0-9]+)\]",
@@ -217,7 +223,7 @@ async def _register_frontend_and_panel_once(hass: HomeAssistant) -> None:
             sidebar_title=_PANEL_SIDEBAR_TITLE,
             sidebar_icon=_PANEL_SIDEBAR_ICON,
             config={},
-            require_admin=False,
+            require_admin=True,
         )
         g["panel_registered"] = True
 
@@ -297,6 +303,53 @@ def _read_or_fetch_cover(host: str, ftp_port: int, tid: str, cover_path: str) ->
         )
 
     return img_bytes
+
+
+async def _cache_cover(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    """
+    Copy the running game's icon0.png into the cover cache, one FTP fetch at a
+    time across all consoles. The cover view only serves this cache or the CDN
+    redirect, so a request to it never opens FTP.
+    """
+    entry_data = hass.data[DOMAIN].get(entry_id)
+    if not entry_data:
+        return
+    tid = entry_data["klog_data"].get(SENSOR_TITLE_ID)
+    if not _is_real_game_title_id(tid):
+        return
+    tid       = tid.strip().upper()
+    game_info = entry_data.get("game_map", {}).get(tid, {})
+    if (game_info.get("cdn_cover") or "").startswith("http"):
+        return
+
+    g        = _global(hass)
+    failures = g.setdefault("cover_failures", {})
+    async with g.setdefault("cover_lock", asyncio.Lock()):
+        if time.monotonic() - failures.get(tid, float("-inf")) < _COVER_RETRY_SECONDS:
+            return
+        if await hass.async_add_executor_job(_cover_cache_path(tid).exists):
+            return
+        cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
+        try:
+            await hass.async_add_executor_job(
+                _read_or_fetch_cover,
+                entry_data["host"],
+                int(entry_data["ftp_port"]),
+                tid,
+                cover_path,
+            )
+        except Exception as err:
+            failures[tid] = time.monotonic()
+            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
+            return
+
+    coordinator.async_set_updated_data(
+        {**(coordinator.data or {}), **entry_data["klog_data"]}
+    )
 
 
 # ── Klog state machine ─────────────────────────────────────────────────────────
@@ -420,6 +473,7 @@ async def _force_db_refresh(
         _LOGGER.info(
             "[ps4_goldhen] force db refresh done — %d titles", len(game_map)
         )
+        await _cache_cover(hass, entry_id, coordinator)
     except Exception as err:
         _LOGGER.warning("[ps4_goldhen] force db refresh failed: %s", err)
 
@@ -454,6 +508,12 @@ def _parse_klog_line(
                 asyncio.ensure_future(
                     _force_db_refresh(hass, entry_id, coordinator)
                 )
+        # known game just started — cache its cover (the refresh above does it
+        # for titles app.db didn't have yet)
+        elif state_changed:
+            coordinator = entry_data.get("coordinator")
+            if coordinator:
+                asyncio.ensure_future(_cache_cover(hass, entry_id, coordinator))
     else:
         klog_data[SENSOR_GAME_NAME]  = None
         klog_data[SENSOR_GAME_COVER] = None
@@ -594,6 +654,7 @@ async def _db_refresh_task(
                 coordinator.async_set_updated_data(
                     {**(coordinator.data or {}), **klog_data}
                 )
+            await _cache_cover(hass, entry_id, coordinator)
 
         except asyncio.CancelledError:
             _LOGGER.info("DB refresh task cancelled")
@@ -607,6 +668,7 @@ async def _db_refresh_task(
 # ── WebSocket commands ─────────────────────────────────────────────────────────
 
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_entries"})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_list_entries(
     hass: HomeAssistant,
@@ -630,6 +692,7 @@ async def ws_list_entries(
 
 
 @websocket_api.websocket_command({vol.Required("type"): "ps4_goldhen/list_payloads"})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_list_payloads(
     hass: HomeAssistant,
@@ -783,17 +846,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     async def handle_send_payload(call: ServiceCall) -> None:
-        p_file   = call.data["payload_file"]
-        t_host   = call.data.get("ps4_host") or host
-        t_port   = int(call.data.get("binloader_port") or binloader_port)
-        filepath = (
-            p_file if os.path.isabs(p_file) else os.path.join(PAYLOAD_DIR, p_file)
-        )
+        # Only a file directly inside PAYLOAD_DIR, only to a console set up in
+        # this integration. binloader_port in the call overrides that
+        # console's port.
+        try:
+            t_host, t_port = payload_target(
+                (e.data for e in hass.config_entries.async_entries(DOMAIN)),
+                call.data.get("ps4_host"),
+                host_key=CONF_PS4_HOST,
+                port_key=CONF_BINLOADER_PORT,
+                default_port=DEFAULT_BINLOADER_PORT,
+            )
+            filepath = payload_path(PAYLOAD_DIR, call.data["payload_file"])
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        if call.data.get("binloader_port"):
+            t_port = int(call.data["binloader_port"])
         await _send_bin_tcp(t_host, t_port, filepath, call.data.get("timeout", 30))
 
+    # Admin-only like the panel: HA refuses a call from a non-admin user
+    # (Unauthorized); calls without a user, such as automations, still run.
     if not hass.services.has_service(DOMAIN, _SVC_SEND_PAYLOAD):
-        hass.services.async_register(
-            DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
+        async_register_admin_service(
+            hass, DOMAIN, _SVC_SEND_PAYLOAD, handle_send_payload,
             schema=_SEND_PAYLOAD_SCHEMA,
         )
 
@@ -812,6 +887,8 @@ class PS4FTPDownloadView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         import ftplib
+        if not request["hass_user"].is_admin:
+            return web.Response(text="Admin only", status=403)
         entry_id = request.query.get("entry_id")
         path     = request.query.get("path")
         if not entry_id or not path:
@@ -847,6 +924,8 @@ class PS4FTPUploadView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         import ftplib
+        if not request["hass_user"].is_admin:
+            return web.Response(text="Admin only", status=403)
         reader   = await request.multipart()
         entry_id = path = file_field = None
         while True:
@@ -881,6 +960,12 @@ class PS4FTPUploadView(HomeAssistantView):
 
 
 class PS4GameCoverView(HomeAssistantView):
+    """
+    No login, because an <img> on a dashboard can't send HA's token. So it only
+    serves covers HA already has (CDN redirect or disk cache) and never opens
+    FTP; _cache_cover fills the cache when a game starts.
+    """
+
     url          = "/api/ps4_goldhen/cover/{entry_id}/{title_id}"
     name         = "api:ps4_goldhen:cover"
     requires_auth = False
@@ -892,7 +977,9 @@ class PS4GameCoverView(HomeAssistantView):
         if not data:
             return web.Response(text="Entry not found", status=404)
 
-        tid       = title_id.strip().upper()
+        tid = title_id.strip().upper()
+        if not _TITLE_ID_RE.fullmatch(tid):
+            return web.Response(text="Not a title ID", status=404)
         game_info = data.get("game_map", {}).get(tid, {})
 
         # Prefer Sony CDN redirect — no local caching needed, browser handles it
@@ -900,24 +987,18 @@ class PS4GameCoverView(HomeAssistantView):
         if cdn_url and cdn_url.startswith("http"):
             raise web.HTTPFound(cdn_url)
 
-        cover_path = game_info.get("cover") or f"/user/appmeta/{tid}/icon0.png"
-
+        cache_file = _cover_cache_path(tid)
         try:
             img_bytes = await request.app["hass"].async_add_executor_job(
-                _read_or_fetch_cover,
-                data["host"],
-                int(data["ftp_port"]),
-                tid,
-                cover_path,
+                cache_file.read_bytes
             )
-            return web.Response(
-                body=img_bytes,
-                content_type="image/png",
-                headers={"Cache-Control": "max-age=86400"},
-            )
-        except Exception as err:
-            _LOGGER.debug("Cover fetch failed for %s: %s", tid, err)
-            return web.Response(text=f"Cover not found: {err}", status=404)
+        except OSError:
+            return web.Response(text="Cover not cached", status=404)
+        return web.Response(
+            body=img_bytes,
+            content_type="image/png",
+            headers={"Cache-Control": "max-age=86400"},
+        )
 
 
 # ── Teardown ───────────────────────────────────────────────────────────────────

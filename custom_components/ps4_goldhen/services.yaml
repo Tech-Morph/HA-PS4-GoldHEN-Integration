@@ -3,26 +3,27 @@ send_payload:
   description: >-
     Stream a .bin or .elf payload file to the PS4 GoldHEN BinLoader over TCP.
     Successful transfer does not confirm execution or firmware compatibility.
-    The file must exist on the Home Assistant host at the path specified (absolute) or inside /config/ps4/payloads/ (bare filename).
+    The file must be inside /config/ps4/payloads/, and it can only go to a console set up in this integration.
+    Admin users only; automations can call it too.
   fields:
     payload_file:
       name: Payload File
       description: >-
-        Filename (e.g. goldhen.bin or payload.elf) relative to /config/ps4/payloads/, or an absolute path on the HA host.
+        File name (e.g. goldhen.bin or payload.elf) of a file directly inside /config/ps4/payloads/, or an absolute path that resolves to one once ".." and links are followed. Any other path is refused.
       required: true
       example: goldhen.bin
       selector:
         text:
     ps4_host:
       name: PS4 Host (optional)
-      description: Override the PS4 IP for this call. Specify explicitly for multi-console use; the global default is captured during setup.
+      description: IP of the console to send to; it must be one set up in this integration. Without it, the first console set up is used.
       required: false
       example: 192.168.1.100
       selector:
         text:
     binloader_port:
       name: BinLoader Port (optional)
-      description: Override the BinLoader TCP port. Specify explicitly together with the host for multi-console use.
+      description: BinLoader TCP port for this call. Without it, the port from the chosen console's entry is used.
       required: false
       example: 9090
       selector:

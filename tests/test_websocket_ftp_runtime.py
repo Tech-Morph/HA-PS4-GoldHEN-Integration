@@ -27,6 +27,7 @@ class FTPHandlerTests(unittest.IsolatedAsyncioTestCase):
         api=ModuleType('homeassistant.components.websocket_api')
         api.websocket_command=lambda schema:lambda f:f
         api.async_response=lambda f:f
+        api.require_admin=lambda f:f
         api.ActiveConnection=object
         components.websocket_api=api
         core=ModuleType('homeassistant.core')

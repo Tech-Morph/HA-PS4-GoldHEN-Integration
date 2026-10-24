@@ -55,6 +55,7 @@ jobs:
           python -B tests/test_klog_shared.py
           python -B tests/test_websocket_ftp_runtime.py
           python -B tests/test_ftp_listing.py
+          python -B tests/test_security.py
 
   frontend:
     name: Frontend
@@ -76,6 +77,8 @@ jobs:
         run: node tests/test_klog_frontend.cjs
       - name: Check FTP rendering
         run: node tests/test_ftp_listing_frontend.cjs
+      - name: Check payload target after a console switch
+        run: node tests/test_panel_console_switch.cjs
 
   regression:
     name: Regression

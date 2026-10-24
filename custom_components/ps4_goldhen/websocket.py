@@ -107,6 +107,7 @@ def async_setup(hass: HomeAssistant) -> None:
         vol.Optional("path", default="/"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_list_dir(
     hass: HomeAssistant,
@@ -136,6 +137,7 @@ async def ws_list_dir(
         vol.Required("is_dir"): bool,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_delete(
     hass: HomeAssistant,
@@ -163,6 +165,7 @@ async def ws_delete(
         vol.Required("to_path"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_rename(
     hass: HomeAssistant,
@@ -189,6 +192,7 @@ async def ws_rename(
         vol.Required("path"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_mkdir(
     hass: HomeAssistant,
@@ -215,6 +219,7 @@ async def ws_mkdir(
         vol.Required("path"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_get_text(
     hass: HomeAssistant,
@@ -242,6 +247,7 @@ async def ws_get_text(
         vol.Required("content"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_put_text(
     hass: HomeAssistant,
@@ -269,6 +275,7 @@ async def ws_put_text(
         vol.Optional("port"): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_klog_subscribe(
     hass: HomeAssistant,

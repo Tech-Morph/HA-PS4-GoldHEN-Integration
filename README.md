@@ -42,9 +42,11 @@ The form only exposes the host, FTP port, and BinLoader port. Klog uses the back
 | Payloads | List `.bin` and `.elf` files on the HA host and send a selected file to BinLoader |
 | Klog | Show live PS4 logs through the backend listener |
 
-There isn't a separate Game Library or Dashboard tab. The current-game sensor uses klog and names from the PS4's `app.db`. Names come from the local database, but cover art can use an external CDN URL from that database.
+There isn't a separate Game Library or Dashboard tab. The current-game sensor uses klog and names from the PS4's `app.db`. Names come from the local database, but cover art can use an external CDN URL from that database. Without one, HA copies the game's icon from the PS4 into `/config/ps4/covers` when the game starts; the cover URL only serves that copy or the CDN redirect and never opens FTP.
 
 The repaired backend owns one klog connection per entry. The panel subscribes to it rather than opening another PS4 connection. There is no history replay, and a subscription label isn't proof of received logs. Close competing klog clients if the panel stays empty.
+
+The panel, its WebSocket commands, the FTP download / upload URLs, and the `send_payload` service are for HA admins only. Automations can still call the service.
 
 ## Payloads
 
@@ -63,7 +65,7 @@ data:
   timeout: 30
 ```
 
-For multiple consoles, set both host and port explicitly. Global defaults and button targeting still need work. The service accepts absolute paths as well as filenames, and its path handling isn't fully restricted yet. The timeout isn't a whole-transfer deadline.
+The service takes the name of a file directly inside `/config/ps4/payloads`, or an absolute path that resolves to a file directly inside it once `..` and links are followed; any other path is refused. `ps4_host` picks the console and must be one set up in this integration; without it, the first console is used. `binloader_port` sets the port for that call; without it, the console's entry port is used. Calls from non-admin users are refused (HA's admin-service check); automations still work. The panel always sends to the console selected at the top. The Restart and Standby buttons send to their own console as the user who pressed them, so a non-admin's press is refused. The timeout isn't a whole-transfer deadline.
 
 `restart.bin` and `standby.bin` aren't bundled, so don't treat those buttons as working power controls. There is no `install_pkg` service or PS5 installer.
 
@@ -89,7 +91,7 @@ These tests use mocks, HA stubs, and loopback FTP servers. They don't replace te
 - Reliable Rest Mode/off detection needs an external `sensor.ps4_state_pi` with `on`, `rest`, or `offline` states. See [PS4 State Monitor](https://github.com/Tech-Morph/PS4-State-Monitor).
 - MLSD timestamps are shown in browser-local time. LIST fallback dates stay as the server returned them; years and timezones aren't guessed.
 - Multiple entries can be added, but app.db and cover caches are shared. Changing an IP can also affect host-based entity IDs.
-- Large transfers, permissions, cover routes, payload paths, and setup/unload cleanup still need work. Keep the PS4 services on your LAN.
+- Large transfers and setup/unload cleanup still need work. Keep the PS4 services on your LAN.
 
 For bug reports, include the HA version, firmware, exact GoldHEN build, integration revision, and relevant logs. Remove credentials and console identifiers first.
 

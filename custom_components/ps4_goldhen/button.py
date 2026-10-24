@@ -39,8 +39,12 @@ class PS4RestartButton(ButtonEntity):
         await self.hass.services.async_call(
             DOMAIN,
             "send_payload",
-            {"payload_file": "restart.bin"},  # You need to provide this payload
+            {
+                "payload_file": "restart.bin",  # You need to provide this payload
+                "ps4_host": self._entry.data[CONF_PS4_HOST],  # this button's console
+            },
             blocking=True,
+            context=self._context,  # the presser's, so a non-admin's press is refused
         )
 
 
@@ -60,6 +64,10 @@ class PS4StandbyButton(ButtonEntity):
         await self.hass.services.async_call(
             DOMAIN,
             "send_payload",
-            {"payload_file": "standby.bin"},  # You need to provide this payload
+            {
+                "payload_file": "standby.bin",  # You need to provide this payload
+                "ps4_host": self._entry.data[CONF_PS4_HOST],  # this button's console
+            },
             blocking=True,
+            context=self._context,  # the presser's, so a non-admin's press is refused
         )
