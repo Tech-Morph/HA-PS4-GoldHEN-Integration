@@ -28,8 +28,8 @@ def payload_target(
 
 
 def payload_path(payload_dir: str, payload_file: str) -> str:
-    """Full path of a file directly inside payload_dir, given by its name or its full path; ValueError for any other
-    path, `..` or a link that leads outside."""
+    """Full path of a file directly inside payload_dir, given by its name or by an absolute path that resolves to it
+    once `..` and links are followed; ValueError for any other path."""
     name = (payload_file or "").strip()
     if os.path.isabs(name):
         path = os.path.realpath(name)

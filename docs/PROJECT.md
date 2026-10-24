@@ -98,15 +98,15 @@ HTTP endpoints are FTP download (GET), FTP upload (POST multipart), and cover GE
 
 ## Payload and native boundaries
 
-Only `ps4_goldhen.send_payload` is registered, as an admin service: HA refuses a call from a non-admin user, and calls without a user (automations) run. `ps4_host` must name a console set up in this integration; without it, the first entry's console is used. A `binloader_port` in the call sets the port; without it, that console's entry port is used. The panel sends to the selected console without a port. The current buttons don't pass a host. `restart.bin`/`standby.bin` are absent from the bundled resources. PKG/RPI/etaHEN/PS5 installation is not implemented.
+Only `ps4_goldhen.send_payload` is registered, as an admin service: HA refuses a call from a non-admin user, and calls without a user (automations) run. `ps4_host` must name a console set up in this integration; without it, the first entry's console is used. A `binloader_port` in the call sets the port; without it, that console's entry port is used. The panel sends to the selected console without a port. The Restart/Standby buttons pass their own entry's host and the pressing user's context, so HA refuses a non-admin's press. `restart.bin`/`standby.bin` are absent from the bundled resources. PKG/RPI/etaHEN/PS5 installation is not implemented.
 
-Sending bytes is not confirmed payload execution. `payload_file` must be the name of a file directly inside `/config/ps4/payloads` or its full path there; other paths, `..` and links that resolve outside it are refused. Resource copying is nonexecuting, skips existing destination names, and does not remove previously copied resources when a bundled file is removed later.
+Sending bytes is not confirmed payload execution. `payload_file` must be the name of a file directly inside `/config/ps4/payloads`, or an absolute path that resolves to a file directly inside it once `..` and links are followed; any other path is refused. Resource copying is nonexecuting, skips existing destination names, and does not remove previously copied resources when a bundled file is removed later.
 
 PS4StateJSON is a separate native producer under repair. This HA connection repair does not change/validate PRX APIs, private output layouts, privilege operations, thread lifetime, fan control/restoration, or audio/game saving. Title-loaded PRX lifetime does not prove home-screen telemetry. Preserve unrelated plugins.ini rules and original native projects.
 
 ## Validation and open work
 
-Six Python suites contain 74 tests: FTP telemetry 17, issue connection 13, shared klog 8, full-module FTP handlers 7, listings 11, security 18. Separate Node syntax and three assertion scripts cover frontend behavior. Test counts describe the current development tree, not future versions or a full HA/native compatibility suite.
+Six Python suites contain 76 tests: FTP telemetry 17, issue connection 13, shared klog 8, full-module FTP handlers 7, listings 11, security 20. Separate Node syntax and three assertion scripts cover frontend behavior. Test counts describe the current development tree, not future versions or a full HA/native compatibility suite.
 
 Issue-connection tests use loopback sockets and import the complete integration module with HA interfaces stubbed. Setup tests record worker creation and skip live worker/frontend/platform behavior. Existing suites also use mocks and selected-function extraction. Keep these limits explicit.
 

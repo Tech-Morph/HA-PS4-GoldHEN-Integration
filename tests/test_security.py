@@ -45,6 +45,12 @@ def load_integration():
         def __init_subclass__(cls, **kwargs):
             pass
 
+    class ButtonEntity:
+        _context = None
+
+        def async_set_context(self, context):  # what HA does before it awaits async_press
+            self._context = context
+
     api = module("homeassistant.components.websocket_api",
                  websocket_command=lambda schema: mark("_ws_command"),
                  require_admin=mark("_admin_only"), async_response=lambda fn: fn,
@@ -62,6 +68,7 @@ def load_integration():
         "homeassistant.components": module("homeassistant.components",
             websocket_api=api, panel_custom=SimpleNamespace()),
         "homeassistant.components.websocket_api": api,
+        "homeassistant.components.button": module("homeassistant.components.button", ButtonEntity=ButtonEntity),
         "homeassistant.components.frontend": module("homeassistant.components.frontend", StaticPathConfig=object),
         "homeassistant.components.http": module("homeassistant.components.http", HomeAssistantView=object),
         "homeassistant.config_entries": module("homeassistant.config_entries", ConfigEntry=object,
@@ -70,6 +77,8 @@ def load_integration():
             ServiceCall=object, callback=lambda fn: fn),
         "homeassistant.exceptions": module("homeassistant.exceptions", HomeAssistantError=RuntimeError),
         "homeassistant.helpers": module("homeassistant.helpers"),
+        "homeassistant.helpers.entity_platform": module("homeassistant.helpers.entity_platform",
+            AddEntitiesCallback=object),
         "homeassistant.helpers.service": module("homeassistant.helpers.service",
             async_register_admin_service=lambda hass, domain, name, fn, schema: ADMIN_SERVICES.setdefault(name, fn)),
         "homeassistant.helpers.update_coordinator": module("homeassistant.helpers.update_coordinator",
@@ -88,7 +97,11 @@ def load_integration():
             websocket = importlib.util.module_from_spec(ws_spec)
             sys.modules[ws_spec.name] = websocket
             ws_spec.loader.exec_module(websocket)
-            return integration, websocket, sys.modules[name + ".payload_target"]
+            button_spec = importlib.util.spec_from_file_location(name + ".button", COMPONENT / "button.py")
+            button = importlib.util.module_from_spec(button_spec)
+            sys.modules[button_spec.name] = button
+            button_spec.loader.exec_module(button)
+            return integration, websocket, sys.modules[name + ".payload_target"], button
         finally:
             for key in list(sys.modules):
                 if key == name or key.startswith(name + "."):
@@ -122,7 +135,7 @@ def executor_hass(data=None):
 class AdminOnlyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         REGISTERED_COMMANDS.clear()
-        self.integration, self.websocket, _ = load_integration()
+        self.integration, self.websocket, _, _ = load_integration()
 
     async def test_panel_requires_admin(self):
         hass = SimpleNamespace(data={})
@@ -160,7 +173,7 @@ class AdminOnlyTests(unittest.IsolatedAsyncioTestCase):
 
 class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.integration, _, self.target = load_integration()
+        self.integration, _, self.target, self.button = load_integration()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.payloads = os.path.realpath(os.path.join(self.tmp.name, "payloads"))
@@ -169,8 +182,8 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
         Path(self.tmp.name, "secrets.yaml").write_text("secret")
         os.symlink(os.path.join(self.tmp.name, "secrets.yaml"), os.path.join(self.payloads, "link.bin"))
 
-        entries = [SimpleNamespace(data={"ps4_host": "192.0.2.1", "binloader_port": 9090}),
-                   SimpleNamespace(data={"ps4_host": "192.0.2.2", "binloader_port": 9091})]
+        self.entries = entries = [SimpleNamespace(data={"ps4_host": "192.0.2.1", "binloader_port": 9090}),
+                                  SimpleNamespace(data={"ps4_host": "192.0.2.2", "binloader_port": 9091})]
         ADMIN_SERVICES.clear()
         self.plain_register = Mock()
         hass = SimpleNamespace(data={},
@@ -224,7 +237,8 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.sent.assert_awaited_once_with("192.0.2.2", 9999, os.path.join(self.payloads, "info.elf"), 30)
 
     async def test_full_path_to_a_file_in_the_payload_folder_is_accepted(self):
-        for name in (os.path.join(self.payloads, "info.elf"), os.path.join(self.payloads, ".", "info.elf")):
+        for name in (os.path.join(self.payloads, "info.elf"), os.path.join(self.payloads, ".", "info.elf"),
+                     os.path.join(self.payloads, "..", "payloads", "info.elf")):
             with self.subTest(payload_file=name):
                 self.sent.reset_mock()
                 await self.call(payload_file=name)
@@ -245,6 +259,31 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
                     await self.call(payload_file=name)
         self.sent.assert_not_awaited()
 
+    async def press(self, button_class, payload_file):
+        # Console B's button, with console A set up first. HA sets the presser's context on the entity, then awaits
+        # async_press; the mocked async_call hands send_payload what HA would: the call's data and context.
+        Path(self.payloads, payload_file).write_bytes(b"")
+        calls = []
+        async def async_call(domain, service, data, *, blocking, context=None):
+            calls.append(SimpleNamespace(domain=domain, service=service, data=data, context=context))
+            await self.handler(SimpleNamespace(data={"timeout": 30, **data}, context=context))
+        button = button_class(self.entries[1])
+        button.hass = SimpleNamespace(services=SimpleNamespace(async_call=async_call))
+        context = SimpleNamespace(user_id="non-admin-user")
+        button.async_set_context(context)
+        await button.async_press()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((calls[0].domain, calls[0].service), ("ps4_goldhen", "send_payload"))
+        self.assertEqual(calls[0].data, {"payload_file": payload_file, "ps4_host": "192.0.2.2"})
+        self.assertIs(calls[0].context, context)
+        self.sent.assert_awaited_once_with("192.0.2.2", 9091, os.path.join(self.payloads, payload_file), 30)
+
+    async def test_restart_button_sends_to_its_console_as_the_presser(self):
+        await self.press(self.button.PS4RestartButton, "restart.bin")
+
+    async def test_standby_button_sends_to_its_console_as_the_presser(self):
+        await self.press(self.button.PS4StandbyButton, "standby.bin")
+
     def test_payload_target_without_consoles(self):
         with self.assertRaises(ValueError):
             self.target.payload_target([], None, host_key="h", port_key="p", default_port=9090)
@@ -254,7 +293,7 @@ class SendPayloadTests(unittest.IsolatedAsyncioTestCase):
 
 class CoverTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.integration, _, _ = load_integration()
+        self.integration, _, _, _ = load_integration()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.covers = os.path.join(self.tmp.name, "covers")

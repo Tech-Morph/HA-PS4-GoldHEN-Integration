@@ -65,7 +65,7 @@ data:
   timeout: 30
 ```
 
-The service takes the name of a file directly inside `/config/ps4/payloads`, or its full path there; other paths and `..` are refused. `ps4_host` picks the console and must be one set up in this integration; without it, the first console is used. `binloader_port` sets the port for that call; without it, the console's entry port is used. Calls from non-admin users are refused (HA's admin-service check); automations still work. The panel always sends to the console selected at the top. Button targeting still needs work. The timeout isn't a whole-transfer deadline.
+The service takes the name of a file directly inside `/config/ps4/payloads`, or an absolute path that resolves to a file directly inside it once `..` and links are followed; any other path is refused. `ps4_host` picks the console and must be one set up in this integration; without it, the first console is used. `binloader_port` sets the port for that call; without it, the console's entry port is used. Calls from non-admin users are refused (HA's admin-service check); automations still work. The panel always sends to the console selected at the top. The Restart and Standby buttons send to their own console as the user who pressed them, so a non-admin's press is refused. The timeout isn't a whole-transfer deadline.
 
 `restart.bin` and `standby.bin` aren't bundled, so don't treat those buttons as working power controls. There is no `install_pkg` service or PS5 installer.
 

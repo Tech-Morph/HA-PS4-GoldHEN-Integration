@@ -9,7 +9,7 @@ send_payload:
     payload_file:
       name: Payload File
       description: >-
-        File name (e.g. goldhen.bin or payload.elf) of a file directly inside /config/ps4/payloads/, or its full path there. Other paths and ".." are refused.
+        File name (e.g. goldhen.bin or payload.elf) of a file directly inside /config/ps4/payloads/, or an absolute path that resolves to one once ".." and links are followed. Any other path is refused.
       required: true
       example: goldhen.bin
       selector:
